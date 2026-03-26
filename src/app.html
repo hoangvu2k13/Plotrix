@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta
+			name="description"
+			content="Plotrix is a professional 2D math graph visualizer for exploring equations, exporting plots, and sharing graph states."
+		/>
+		<meta name="theme-color" content="#09090b" />
+		<script>
+			(() => {
+				const saved = localStorage.getItem('plotrix-theme') ?? 'system';
+				const resolved =
+					saved === 'system'
+						? window.matchMedia('(prefers-color-scheme: dark)').matches
+							? 'dark'
+							: 'light'
+						: saved;
+
+				document.documentElement.dataset.theme = resolved;
+				document.documentElement.style.colorScheme = resolved;
+			})();
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>
