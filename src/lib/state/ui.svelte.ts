@@ -23,17 +23,24 @@ export function createUiState() {
 	const ui = $state({
 		sidebarOpen: true,
 		activeEquationId: null as string | null,
+		activeAnalysisEquationId: null as string | null,
+		activeRegressionSeriesId: null as string | null,
 		tooltipVisible: false,
 		tooltipContent: '',
 		tooltipAnchor: null as TooltipAnchor | null,
 		toasts: [] as Toast[],
-		modalOpen: null as 'settings' | 'export' | 'share' | 'shortcuts' | null,
+		modalOpen: null as 'settings' | 'export' | 'share' | 'shortcuts' | 'regression' | null,
 		commandPaletteOpen: false,
+		announcement: '',
 		tracePoint: null as TracePoint | null,
-		isPanningOrZooming: false
+		isPanningOrZooming: false,
+		highlightedAsymptotes: [] as number[],
+		selectedEquationIds: new Set<string>(),
+		sidebarActiveTab: 'equations' as 'equations' | 'data'
 	});
 
 	let interactionTimer: ReturnType<typeof setTimeout> | null = null;
+	let announcementTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function pushToast(toast: Omit<Toast, 'id' | 'duration'> & { duration?: number }): string {
 		const id = nanoid();
@@ -74,7 +81,7 @@ export function createUiState() {
 		ui.tooltipAnchor = null;
 	}
 
-	function openModal(name: 'settings' | 'export' | 'share' | 'shortcuts'): void {
+	function openModal(name: 'settings' | 'export' | 'share' | 'shortcuts' | 'regression'): void {
 		ui.modalOpen = name;
 	}
 
@@ -84,6 +91,58 @@ export function createUiState() {
 
 	function setTracePoint(tracePoint: TracePoint | null): void {
 		ui.tracePoint = tracePoint;
+	}
+
+	function setActiveEquationId(id: string | null): void {
+		ui.activeEquationId = id;
+	}
+
+	function setActiveAnalysisEquationId(id: string | null): void {
+		ui.activeAnalysisEquationId = id;
+	}
+
+	function setActiveRegressionSeriesId(id: string | null): void {
+		ui.activeRegressionSeriesId = id;
+	}
+
+	function setSidebarOpen(open: boolean): void {
+		ui.sidebarOpen = open;
+	}
+
+	function setSidebarActiveTab(tab: 'equations' | 'data'): void {
+		ui.sidebarActiveTab = tab;
+	}
+
+	function setCommandPaletteOpen(open: boolean): void {
+		ui.commandPaletteOpen = open;
+	}
+
+	function announce(message: string): void {
+		ui.announcement = message;
+
+		if (announcementTimer) {
+			clearTimeout(announcementTimer);
+		}
+
+		announcementTimer = setTimeout(() => {
+			ui.announcement = '';
+			announcementTimer = null;
+		}, 1200);
+	}
+
+	function setHighlightedAsymptotes(values: number[]): void {
+		ui.highlightedAsymptotes = [...values];
+	}
+
+	function setSelectedEquationIds(ids: Iterable<string>): void {
+		ui.selectedEquationIds = new Set(ids);
+	}
+
+	function toggleSelectedEquationId(id: string): void {
+		const next = new Set(ui.selectedEquationIds);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		ui.selectedEquationIds = next;
 	}
 
 	function pingInteraction(timeout = 800): void {
@@ -107,6 +166,16 @@ export function createUiState() {
 		openModal,
 		closeModal,
 		setTracePoint,
+		setActiveEquationId,
+		setActiveAnalysisEquationId,
+		setActiveRegressionSeriesId,
+		setSidebarOpen,
+		setSidebarActiveTab,
+		setCommandPaletteOpen,
+		announce,
+		setHighlightedAsymptotes,
+		setSelectedEquationIds,
+		toggleSelectedEquationId,
 		pingInteraction
 	});
 }

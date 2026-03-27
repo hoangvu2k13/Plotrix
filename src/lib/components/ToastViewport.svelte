@@ -31,7 +31,7 @@
 <style>
 	.viewport {
 		position: fixed;
-		top: var(--space-6);
+		bottom: var(--space-6);
 		right: var(--space-6);
 		z-index: var(--z-toast);
 		display: grid;

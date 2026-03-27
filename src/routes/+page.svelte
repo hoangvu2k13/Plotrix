@@ -3,13 +3,17 @@
 	import { onMount } from 'svelte';
 
 	import CommandPalette, { type CommandAction } from '$components/CommandPalette.svelte';
+	import DataPanel from '$components/DataPanel.svelte';
 	import EquationCard from '$components/EquationCard.svelte';
 	import GraphCanvas from '$components/GraphCanvas.svelte';
 	import IconButton from '$components/IconButton.svelte';
 	import Modal from '$components/Modal.svelte';
+	import AnalysisPanel from '$components/AnalysisPanel.svelte';
+	import RegressionPanel from '$components/RegressionPanel.svelte';
 	import Select from '$components/Select.svelte';
 	import ToastViewport from '$components/ToastViewport.svelte';
 	import Toggle from '$components/Toggle.svelte';
+	import VariableSliderPanel from '$components/VariableSliderPanel.svelte';
 	import { createGraphState } from '$stores/graph.svelte';
 	import { createUiState } from '$stores/ui.svelte';
 	import { copyText, saveBlob, saveText } from '$utils/download';
@@ -29,6 +33,13 @@
 		{ value: 'cartesian', label: 'Cartesian' },
 		{ value: 'polar', label: 'Polar' }
 	];
+	const SETTINGS_SECTIONS_KEY = 'plotrix-settings-sections';
+	const DEFAULT_SETTINGS_SECTIONS = {
+		appearance: true,
+		grid: true,
+		analysis: true,
+		rendering: true
+	} as const;
 
 	const shortcuts = [
 		['Pan', 'Drag or use arrow keys'],
@@ -37,12 +48,18 @@
 		['Fit all', 'F'],
 		['New equation', formatShortcut('Mod+E')],
 		['Undo / redo', `${formatShortcut('Mod+Z')} / ${formatShortcut('Mod+Shift+Z')}`],
-		['Command palette', formatShortcut('Mod+K')]
+		['Command palette', formatShortcut('Mod+K')],
+		['Toggle analysis', formatShortcut('Mod+Shift+A')],
+		['Open regression', formatShortcut('Mod+Shift+R')],
+		['Open data tab', formatShortcut('Mod+Shift+D')],
+		['Toggle markers', formatShortcut('Mod+Shift+M')],
+		['Toggle intersections', formatShortcut('Mod+Shift+I')]
 	] as const;
 
 	let importInput: HTMLInputElement | null = null;
 	let shareUrl = $state('');
 	let resizingSidebar = $state(false);
+	let settingsSections = $state({ ...DEFAULT_SETTINGS_SECTIONS });
 
 	const canUndo = $derived(graph.historyIndex > 0);
 	const canRedo = $derived(graph.historyIndex < graph.historySize - 1);
@@ -52,11 +69,33 @@
 	function addEquation(raw = ''): void {
 		const equation = graph.addEquation(raw);
 		ui.activeEquationId = equation.id;
+		ui.selectedEquationIds = new Set([equation.id]);
 		ui.sidebarOpen = true;
+		ui.announce('Equation added');
 	}
 
 	function setActiveEquation(id: string): void {
 		ui.activeEquationId = id;
+		ui.selectedEquationIds = new Set([id]);
+	}
+
+	function shadeBetweenSelected(): void {
+		const selected = graph.equations.filter((equation) => ui.selectedEquationIds.has(equation.id));
+		if (selected.length !== 2 || selected.some((equation) => equation.kind !== 'cartesian')) {
+			return;
+		}
+
+		const [first, second] = selected;
+		if (!first || !second) {
+			return;
+		}
+		graph.addEquation(`y >= ${first.raw}`, 'inequality');
+		graph.addEquation(`y <= ${second.raw}`, 'inequality');
+		ui.pushToast({
+			title: 'Shaded region added',
+			description: 'Created an inequality pair between the selected curves.',
+			tone: 'success'
+		});
 	}
 
 	function toggleTheme(): void {
@@ -138,6 +177,13 @@
 		importInput?.click();
 	}
 
+	function toggleSettingsSection(section: keyof typeof DEFAULT_SETTINGS_SECTIONS): void {
+		settingsSections = {
+			...settingsSections,
+			[section]: !settingsSections[section]
+		};
+	}
+
 	async function handleImport(event: Event): Promise<void> {
 		const input = event.currentTarget as HTMLInputElement;
 		const file = input.files?.[0];
@@ -149,6 +195,7 @@
 		try {
 			graph.importJSON(await file.text());
 			ui.activeEquationId = graph.equations[0]?.id ?? null;
+			ui.announce('Session imported');
 			ui.pushToast({
 				title: 'Session imported',
 				description: 'Plotrix restored the graph from your JSON file.',
@@ -235,6 +282,44 @@
 			title: 'Open settings',
 			description: 'Fine tune canvas, theme, and rendering preferences.',
 			run: () => ui.openModal('settings')
+		},
+		{
+			id: 'toggle-analysis',
+			title: 'Toggle analysis panel',
+			description: 'Open the analysis drawer for the active equation.',
+			shortcut: 'Mod+Shift+A',
+			run: () => (ui.activeAnalysisEquationId = ui.activeEquationId)
+		},
+		{
+			id: 'open-regression',
+			title: 'Open regression panel',
+			description: 'Fit a model to the active data sheet.',
+			shortcut: 'Mod+Shift+R',
+			run: () => ui.openModal('regression')
+		},
+		{
+			id: 'open-data',
+			title: 'Switch to data tab',
+			description: 'Open the spreadsheet data panel.',
+			shortcut: 'Mod+Shift+D',
+			run: () => {
+				ui.sidebarActiveTab = 'data';
+				ui.sidebarOpen = true;
+			}
+		},
+		{
+			id: 'toggle-markers',
+			title: 'Toggle critical markers',
+			description: 'Show or hide critical point markers.',
+			shortcut: 'Mod+Shift+M',
+			run: () => graph.updateSettings({ showCriticalPoints: !graph.settings.showCriticalPoints })
+		},
+		{
+			id: 'toggle-intersections',
+			title: 'Toggle intersections',
+			description: 'Show or hide intersection markers.',
+			shortcut: 'Mod+Shift+I',
+			run: () => graph.updateSettings({ showIntersections: !graph.settings.showIntersections })
 		}
 	]);
 
@@ -250,18 +335,37 @@
 		}
 
 		const hash = window.location.hash;
+		let restored = false;
+		const savedSections = localStorage.getItem(SETTINGS_SECTIONS_KEY);
+
+		if (savedSections) {
+			try {
+				const parsed = JSON.parse(savedSections) as Partial<typeof DEFAULT_SETTINGS_SECTIONS>;
+				settingsSections = {
+					appearance: parsed.appearance ?? DEFAULT_SETTINGS_SECTIONS.appearance,
+					grid: parsed.grid ?? DEFAULT_SETTINGS_SECTIONS.grid,
+					analysis: parsed.analysis ?? DEFAULT_SETTINGS_SECTIONS.analysis,
+					rendering: parsed.rendering ?? DEFAULT_SETTINGS_SECTIONS.rendering
+				};
+			} catch {
+				localStorage.removeItem(SETTINGS_SECTIONS_KEY);
+			}
+		}
 
 		try {
 			if (hash.startsWith('#plotrix=')) {
 				graph.importJSON(hash);
+				restored = true;
 			} else {
 				const stored = localStorage.getItem('plotrix-session');
 
 				if (stored) {
 					graph.importJSON(stored);
+					restored = true;
 				}
 			}
 		} catch {
+			localStorage.removeItem('plotrix-session');
 			ui.pushToast({
 				title: 'Previous session skipped',
 				description: 'Plotrix started fresh because the saved session could not be restored.',
@@ -275,6 +379,10 @@
 
 		if (hash === '#share') {
 			openShareModal();
+		}
+
+		if (!restored && !graph.equations.length) {
+			graph.seedStarterEquations();
 		}
 
 		ui.activeEquationId = graph.equations[0]?.id ?? null;
@@ -296,7 +404,16 @@
 			return;
 		}
 
-		graph.renderVersion;
+		localStorage.setItem(SETTINGS_SECTIONS_KEY, JSON.stringify(settingsSections));
+	});
+
+	$effect(() => {
+		if (!browser) {
+			return;
+		}
+
+		graph.historyIndex;
+		graph.historySize;
 		localStorage.setItem('plotrix-session', graph.exportJSON());
 	});
 </script>
@@ -313,10 +430,21 @@
 	onchange={handleImport}
 />
 
+<div class="sr-only" aria-live="polite" aria-atomic="true">{ui.announcement}</div>
+
 <div class="page-shell">
 	<header class="topbar">
+		<div class="topbar-brand" aria-hidden="true">
+			<img src="/brand/icon.svg" alt="" width="18" height="18" />
+			<span>Plotrix</span>
+		</div>
+
 		<div class="toolbar-cluster">
-			<IconButton label={ui.sidebarOpen ? 'Hide panel' : 'Show panel'} size={36} onClick={() => (ui.sidebarOpen = !ui.sidebarOpen)}>
+			<IconButton
+				label={ui.sidebarOpen ? 'Hide panel' : 'Show panel'}
+				size={36}
+				onClick={() => ui.setSidebarOpen(!ui.sidebarOpen)}
+			>
 				<svg viewBox="0 0 20 20" aria-hidden="true">
 					{#if ui.sidebarOpen}
 						<path
@@ -340,7 +468,7 @@
 				</svg>
 			</IconButton>
 
-			<IconButton label="Command" size={36} onClick={() => (ui.commandPaletteOpen = true)}>
+			<IconButton label="Command" size={36} onClick={() => ui.setCommandPaletteOpen(true)}>
 				<svg viewBox="0 0 20 20" aria-hidden="true">
 					<path
 						d="M3.5 5.5h13v9h-13zM6.25 8.25l2 1.75-2 1.75M11 13h3"
@@ -451,13 +579,17 @@
 		</div>
 	</header>
 
-	<div class="workspace" style={`--sidebar-width: ${graph.settings.equationPanelWidth}px`}>
+	<div
+		class:sidebar-collapsed={!ui.sidebarOpen}
+		class="workspace"
+		style={`--sidebar-width: ${graph.settings.equationPanelWidth}px`}
+	>
 		<button
 			type="button"
 			class:shown={ui.sidebarOpen}
 			class="mobile-overlay"
 			aria-label="Close sidebar"
-			onclick={() => (ui.sidebarOpen = false)}
+			onclick={() => ui.setSidebarOpen(false)}
 		></button>
 
 		<aside class:open={ui.sidebarOpen} class="sidebar">
@@ -465,16 +597,19 @@
 				<header class="sidebar-header">
 					<div class="brand-lockup">
 						<div class="brand-mark">
-							<img src="/brand/icon.svg" alt="" />
+							<img src="/brand/icon.svg" alt="" width="22" height="22" />
 						</div>
 						<div>
 							<p class="brand-title">Plotrix</p>
-							<p class="brand-subtitle">{equationCount} equations</p>
 						</div>
 					</div>
 
 					<div class="sidebar-actions">
-						<button type="button" class="compact-action compact-action-accent" onclick={() => addEquation('')}>
+						<button
+							type="button"
+							class="compact-action compact-action-accent"
+							onclick={() => addEquation('')}
+						>
 							<svg viewBox="0 0 20 20" aria-hidden="true">
 								<path
 									d="M10 4.5v11M4.5 10h11"
@@ -487,50 +622,114 @@
 							<span>Add</span>
 						</button>
 
-						<button type="button" class="compact-action compact-action-neutral" onclick={openImportDialog}>
+						<button
+							type="button"
+							class="compact-action compact-action-neutral"
+							onclick={openImportDialog}
+						>
+							<svg viewBox="0 0 20 20" aria-hidden="true">
+								<path
+									d="M10 3.5v8m0 0 2.75-2.75M10 11.5 7.25 8.75M4 13.75v1.75h12v-1.75"
+									fill="none"
+									stroke="currentColor"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									stroke-width="1.5"
+								/>
+							</svg>
 							<span>Import</span>
 						</button>
 					</div>
 				</header>
-
-				<div class="panel-stats">
-					<div>
-						<strong>{visibleCount}</strong>
-						<span>Visible</span>
-					</div>
-					<div>
-						<strong>{graph.settings.gridStyle}</strong>
-						<span>Grid</span>
-					</div>
-					<div>
-						<strong>{resolveTheme(graph.settings.theme)}</strong>
-						<span>Theme</span>
-					</div>
+				<div class="sidebar-tabs" role="tablist" aria-label="Sidebar mode">
+					<button
+						type="button"
+						role="tab"
+						class="sidebar-tab"
+						class:active={ui.sidebarActiveTab === 'equations'}
+						aria-selected={ui.sidebarActiveTab === 'equations'}
+						onclick={() => ui.setSidebarActiveTab('equations')}
+					>
+						<svg viewBox="0 0 20 20" aria-hidden="true">
+							<path
+								d="M4 13.75h12M5.5 11V7m4 4V5.5m4 5.5V8"
+								fill="none"
+								stroke="currentColor"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="1.5"
+							/>
+						</svg>
+						Equations
+					</button>
+					<button
+						type="button"
+						role="tab"
+						class="sidebar-tab"
+						class:active={ui.sidebarActiveTab === 'data'}
+						aria-selected={ui.sidebarActiveTab === 'data'}
+						onclick={() => ui.setSidebarActiveTab('data')}
+					>
+						<svg viewBox="0 0 20 20" aria-hidden="true">
+							<path
+								d="M4.5 4.5h11v11h-11zM4.5 8.5h11M8.5 4.5v11M12.5 4.5v11"
+								fill="none"
+								stroke="currentColor"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="1.5"
+							/>
+						</svg>
+						Data
+					</button>
 				</div>
 
-				<div class="equation-list">
-					{#if graph.equations.length}
-						{#each graph.equations as equation, index (equation.id)}
-							<EquationCard {graph} {ui} {equation} {index} onActivate={setActiveEquation} />
-						{/each}
-					{:else}
-						<div class="empty-state">
-							<p>No equations yet.</p>
-							<button type="button" class="compact-action compact-action-accent" onclick={() => addEquation('')}>
-								<svg viewBox="0 0 20 20" aria-hidden="true">
-									<path
-										d="M10 4.5v11M4.5 10h11"
-										fill="none"
-										stroke="currentColor"
-										stroke-linecap="round"
-										stroke-width="1.8"
-									/>
-								</svg>
-								<span>Add equation</span>
-							</button>
-						</div>
-					{/if}
-				</div>
+				{#if ui.sidebarActiveTab === 'equations'}
+					<div class="sidebar-tab-content equation-list">
+						{#if graph.equations.length}
+							{#each graph.equations as equation, index (equation.id)}
+								<EquationCard {graph} {ui} {equation} {index} onActivate={setActiveEquation} />
+							{/each}
+						{:else}
+							<div class="empty-state">
+								<p>No equations yet.</p>
+								<button
+									type="button"
+									class="compact-action compact-action-accent"
+									onclick={() => addEquation('')}
+								>
+									<svg viewBox="0 0 20 20" aria-hidden="true">
+										<path
+											d="M10 4.5v11M4.5 10h11"
+											fill="none"
+											stroke="currentColor"
+											stroke-linecap="round"
+											stroke-width="1.8"
+										/>
+									</svg>
+									<span>Add equation</span>
+								</button>
+							</div>
+						{/if}
+
+						<VariableSliderPanel {graph} />
+					</div>
+				{:else}
+					<div class="sidebar-tab-content">
+						<DataPanel {graph} {ui} />
+					</div>
+				{/if}
+				{#if ui.sidebarActiveTab === 'equations' && ui.selectedEquationIds.size === 2}
+					<div class="sidebar-footer">
+						<button
+							type="button"
+							class="compact-action compact-action-neutral shade-between"
+							onclick={shadeBetweenSelected}
+						>
+							Shade between
+						</button>
+					</div>
+				{/if}
 			</section>
 		</aside>
 
@@ -547,6 +746,8 @@
 	</div>
 </div>
 
+<AnalysisPanel {graph} {ui} />
+
 <Modal
 	open={ui.modalOpen === 'settings'}
 	title="Settings"
@@ -554,140 +755,299 @@
 	onClose={() => ui.closeModal()}
 >
 	<div class="settings-list">
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Theme</strong>
-				<p>Choose how Plotrix resolves light and dark surfaces.</p>
-			</div>
-			<Select
-				value={graph.settings.theme}
-				options={themeOptions}
-				ariaLabel="Theme"
-				onChange={(value) =>
-					graph.updateSettings({
-						theme: value as typeof graph.settings.theme
-					})}
-			/>
-		</div>
+		<section class="settings-category">
+			<button
+				type="button"
+				class="settings-category-header"
+				aria-expanded={settingsSections.appearance}
+				onclick={() => toggleSettingsSection('appearance')}
+			>
+				<div>
+					<h3>Appearance</h3>
+					<p>Core presentation and interaction overlays.</p>
+				</div>
+				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.appearance}>
+					<path
+						d="m6 8 4 4 4-4"
+						fill="none"
+						stroke="currentColor"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="1.7"
+					/>
+				</svg>
+			</button>
+			{#if settingsSections.appearance}
+				<div class="settings-category-body">
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v2.25M10 14.75V17M4.75 4.75l1.5 1.5M13.75 13.75l1.5 1.5M3 10h2.25M14.75 10H17M4.75 15.25l1.5-1.5M13.75 6.25l1.5-1.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M12.25 4.75a5.25 5.25 0 1 0 2.75 9 5.5 5.5 0 0 1-2.75-9Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong>Theme</strong>
+						</div>
+						<Select
+							value={graph.settings.theme}
+							options={themeOptions}
+							ariaLabel="Theme"
+							onChange={(value) => graph.updateSettings({ theme: value as typeof graph.settings.theme })}
+						/>
+					</div>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Grid style</strong>
-				<p>Switch between cartesian and polar scaffolding.</p>
-			</div>
-			<Select
-				value={graph.settings.gridStyle}
-				options={gridStyleOptions}
-				ariaLabel="Grid style"
-				onChange={(value) =>
-					graph.updateSettings({
-						gridStyle: value as typeof graph.settings.gridStyle
-					})}
-			/>
-		</div>
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 6.5h3l2 7 2-7h3M4.5 13.5h3M12.5 13.5h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-axis-labels-label">Axis labels</strong>
+							<p>Numeric tick labels along axes.</p>
+						</div>
+						<Toggle
+							label="Axis labels"
+							ariaLabelledby="setting-axis-labels-label"
+							checked={graph.settings.axisLabelsVisible}
+							onChange={(checked) => graph.updateSettings({ axisLabelsVisible: checked })}
+						/>
+					</div>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Grid</strong>
-				<p>Show or hide the graph grid entirely.</p>
-			</div>
-			<Toggle
-				label="Grid visibility"
-				checked={graph.settings.gridVisible}
-				onChange={(checked) => graph.updateSettings({ gridVisible: checked })}
-			/>
-		</div>
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 3v3M10 14v3M3 10h3M14 10h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-crosshair-label">Crosshair</strong>
+							<p>Pointer-aligned coordinate overlay.</p>
+						</div>
+						<Toggle
+							label="Crosshair overlay"
+							ariaLabelledby="setting-crosshair-label"
+							checked={graph.settings.crosshairVisible}
+							onChange={(checked) => graph.updateSettings({ crosshairVisible: checked })}
+						/>
+					</div>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Minor grid</strong>
-				<p>Render sub-divisions between major grid intervals.</p>
-			</div>
-			<Toggle
-				label="Minor grid"
-				checked={graph.settings.minorGridVisible}
-				onChange={(checked) => graph.updateSettings({ minorGridVisible: checked })}
-			/>
-		</div>
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5 14.5 10 10.75 10.75 10 14.5 6 4.5Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><circle cx="14.75" cy="5.25" r="1" fill="currentColor" stroke="none" /></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-trace-label">Trace mode</strong>
+							<p>Snap to nearest curve while hovering.</p>
+						</div>
+						<Toggle
+							label="Trace mode"
+							ariaLabelledby="setting-trace-label"
+							checked={graph.settings.traceMode}
+							onChange={(checked) => graph.updateSettings({ traceMode: checked })}
+						/>
+					</div>
+				</div>
+			{/if}
+		</section>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Axis labels</strong>
-				<p>Display numeric tick labels along the axes.</p>
-			</div>
-			<Toggle
-				label="Axis labels"
-				checked={graph.settings.axisLabelsVisible}
-				onChange={(checked) => graph.updateSettings({ axisLabelsVisible: checked })}
-			/>
-		</div>
+		<section class="settings-category">
+			<button
+				type="button"
+				class="settings-category-header"
+				aria-expanded={settingsSections.grid}
+				onclick={() => toggleSettingsSection('grid')}
+			>
+				<div>
+					<h3>Grid & Axes</h3>
+					<p>Structure, spacing, and axis scaffolding.</p>
+				</div>
+				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.grid}>
+					<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
+				</svg>
+			</button>
+			{#if settingsSections.grid}
+				<div class="settings-category-body">
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6.5h12M4 10h12M4 13.5h12" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-grid-label">Grid</strong>
+							<p>Toggle entire graph grid.</p>
+						</div>
+						<Toggle
+							label="Grid visibility"
+							ariaLabelledby="setting-grid-label"
+							checked={graph.settings.gridVisible}
+							onChange={(checked) => graph.updateSettings({ gridVisible: checked })}
+						/>
+					</div>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Crosshair</strong>
-				<p>Show a pointer-aligned coordinate crosshair over the canvas.</p>
-			</div>
-			<Toggle
-				label="Crosshair overlay"
-				checked={graph.settings.crosshairVisible}
-				onChange={(checked) => graph.updateSettings({ crosshairVisible: checked })}
-			/>
-		</div>
+					<div class="setting-row setting-row-nested" class:is-disabled={!graph.settings.gridVisible}>
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11M14 4.5v11M3.5 7h13M3.5 13h13" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong>Grid style</strong>
+							<p>Switch between Cartesian and Polar.</p>
+						</div>
+						<Select
+							value={graph.settings.gridStyle}
+							options={gridStyleOptions}
+							ariaLabel="Grid style"
+							disabled={!graph.settings.gridVisible}
+							onChange={(value) => graph.updateSettings({ gridStyle: value as typeof graph.settings.gridStyle })}
+						/>
+					</div>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Trace mode</strong>
-				<p>Snap to the nearest visible curve while hovering.</p>
-			</div>
-			<Toggle
-				label="Trace mode"
-				checked={graph.settings.traceMode}
-				onChange={(checked) => graph.updateSettings({ traceMode: checked })}
-			/>
-		</div>
+					<div class="setting-row setting-row-nested" class:is-disabled={!graph.settings.gridVisible}>
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6.5h.01M14 6.5h.01M6 13.5h.01M14 13.5h.01" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-minor-grid-label">Minor grid</strong>
+							<p>Render sub-divisions between major intervals.</p>
+						</div>
+						<Toggle
+							label="Minor grid"
+							ariaLabelledby="setting-minor-grid-label"
+							disabled={!graph.settings.gridVisible}
+							checked={graph.settings.minorGridVisible}
+							onChange={(checked) => graph.updateSettings({ minorGridVisible: checked })}
+						/>
+					</div>
+				</div>
+			{/if}
+		</section>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Render timings</strong>
-				<p>Expose per-curve render durations in the equation cards.</p>
-			</div>
-			<Toggle
-				label="Render timings"
-				checked={graph.settings.showRenderTime}
-				onChange={(checked) => graph.updateSettings({ showRenderTime: checked })}
-			/>
-		</div>
+		<section class="settings-category">
+			<button
+				type="button"
+				class="settings-category-header"
+				aria-expanded={settingsSections.analysis}
+				onclick={() => toggleSettingsSection('analysis')}
+			>
+				<div>
+					<h3>Analysis</h3>
+					<p>Markers and analytical overlays.</p>
+				</div>
+				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.analysis}>
+					<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
+				</svg>
+			</button>
+			{#if settingsSections.analysis}
+				<div class="settings-category-body">
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5v8m0 0 2.75-2.75M10 11.5 7.25 8.75M4 13.75v1.75h12v-1.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-critical-label">Critical markers</strong>
+							<p>Show detected roots, extrema, and inflection points.</p>
+						</div>
+						<Toggle
+							label="Critical markers"
+							ariaLabelledby="setting-critical-label"
+							checked={graph.settings.showCriticalPoints}
+							onChange={(checked) => graph.updateSettings({ showCriticalPoints: checked })}
+						/>
+					</div>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>HiDPI rendering</strong>
-				<p>Use device pixel ratio scaling for sharper output.</p>
-			</div>
-			<Toggle
-				label="HiDPI rendering"
-				checked={graph.settings.highDPI}
-				onChange={(checked) => graph.updateSettings({ highDPI: checked })}
-			/>
-		</div>
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-intersections-label">Intersections</strong>
+							<p>Show detected intersections between visible curves.</p>
+						</div>
+						<Toggle
+							label="Intersection markers"
+							ariaLabelledby="setting-intersections-label"
+							checked={graph.settings.showIntersections}
+							onChange={(checked) => graph.updateSettings({ showIntersections: checked })}
+						/>
+					</div>
+				</div>
+			{/if}
+		</section>
 
-		<div class="setting-row">
-			<div class="setting-copy">
-				<strong>Antialiasing</strong>
-				<p>Smooth curves and axes when rasterizing the graph.</p>
-			</div>
-			<Toggle
-				label="Antialiasing"
-				checked={graph.settings.antialiasing}
-				onChange={(checked) => graph.updateSettings({ antialiasing: checked })}
-			/>
-		</div>
+		<section class="settings-category">
+			<button
+				type="button"
+				class="settings-category-header"
+				aria-expanded={settingsSections.rendering}
+				onclick={() => toggleSettingsSection('rendering')}
+			>
+				<div>
+					<h3>Rendering</h3>
+					<p>Performance and raster output behavior.</p>
+				</div>
+				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.rendering}>
+					<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
+				</svg>
+			</button>
+			{#if settingsSections.rendering}
+				<div class="settings-category-body">
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.25a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm0-1.75v2M10 15.5v2M4.5 10h-2M17.5 10h-2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-render-timing-label">Render timings</strong>
+							<p>Per-curve render durations on cards.</p>
+						</div>
+						<Toggle
+							label="Render timings"
+							ariaLabelledby="setting-render-timing-label"
+							checked={graph.settings.showRenderTime}
+							onChange={(checked) => graph.updateSettings({ showRenderTime: checked })}
+						/>
+					</div>
+
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h9v8H4zM13 8.5l2.5-2.5M10.5 9.5l4 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-hidpi-label">HiDPI rendering</strong>
+							<p>Pixel ratio scaling for sharper output.</p>
+						</div>
+						<Toggle
+							label="HiDPI rendering"
+							ariaLabelledby="setting-hidpi-label"
+							checked={graph.settings.highDPI}
+							onChange={(checked) => graph.updateSettings({ highDPI: checked })}
+						/>
+					</div>
+
+					<div class="setting-row">
+						<div class="setting-row-icon">
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 10a5.5 5.5 0 0 1 11 0M6.5 10a3.5 3.5 0 1 1 7 0M10 10l2.75-2.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+						</div>
+						<div class="setting-copy">
+							<strong id="setting-antialiasing-label">Antialiasing</strong>
+							<p>Smooth curves and axes during rasterization.</p>
+						</div>
+						<Toggle
+							label="Antialiasing"
+							ariaLabelledby="setting-antialiasing-label"
+							checked={graph.settings.antialiasing}
+							onChange={(checked) => graph.updateSettings({ antialiasing: checked })}
+						/>
+					</div>
+				</div>
+			{/if}
+		</section>
 	</div>
+</Modal>
+
+<Modal
+	open={ui.modalOpen === 'regression'}
+	title="Regression"
+	onClose={() => ui.closeModal()}
+>
+	<RegressionPanel {graph} {ui} />
 </Modal>
 
 <Modal
 	open={ui.modalOpen === 'export'}
 	title="Export"
-	description="Choose a delivery format for the current graph."
 	onClose={() => ui.closeModal()}
 >
 	<div class="export-grid">
@@ -717,7 +1077,6 @@
 <Modal
 	open={ui.modalOpen === 'share'}
 	title="Share"
-	description="Create a self-contained URL for the current graph state."
 	onClose={() => ui.closeModal()}
 >
 	<div class="share-stack">
@@ -740,7 +1099,6 @@
 <Modal
 	open={ui.modalOpen === 'shortcuts'}
 	title="Shortcuts"
-	description="Keyboard controls for navigating the graph faster."
 	onClose={() => ui.closeModal()}
 >
 	<div class="shortcut-list">
@@ -756,7 +1114,7 @@
 <CommandPalette
 	open={ui.commandPaletteOpen}
 	actions={commandActions}
-	onClose={() => (ui.commandPaletteOpen = false)}
+	onClose={() => ui.setCommandPaletteOpen(false)}
 />
 <ToastViewport {ui} />
 
@@ -785,6 +1143,22 @@
 		padding: 0 var(--space-4);
 		border-bottom: 1px solid var(--color-border);
 		background: var(--color-bg-surface);
+		overflow-x: auto;
+	}
+
+	.topbar-brand {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
+		flex-shrink: 0;
+		margin-right: var(--space-2);
+		color: var(--color-text-primary);
+		font-size: var(--text-sm);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	.topbar-brand img {
+		display: block;
 	}
 
 	.toolbar-cluster {
@@ -806,29 +1180,46 @@
 	.workspace {
 		position: relative;
 		display: grid;
-		grid-template-columns: var(--sidebar-width) 8px minmax(0, 1fr);
+		grid-template-columns: var(--sidebar-width) 0 minmax(0, 1fr);
 		min-height: 0;
 		padding: var(--space-3);
 		gap: var(--space-3);
+		transition: grid-template-columns var(--duration-normal) var(--ease-default);
+	}
+
+	.workspace.sidebar-collapsed {
+		grid-template-columns: 0 0 minmax(0, 1fr);
 	}
 
 	.sidebar {
 		position: relative;
 		z-index: var(--z-sidebar);
 		min-height: 0;
+		min-width: 0;
+		overflow: hidden;
+		transition:
+			opacity var(--duration-normal) var(--ease-default),
+			transform var(--duration-normal) var(--ease-default);
+	}
+
+	.workspace.sidebar-collapsed .sidebar {
+		opacity: 0;
+		pointer-events: none;
+		transform: translateX(calc(-1 * var(--space-4)));
 	}
 
 	.sidebar-panel {
-		display: grid;
-		grid-template-rows: auto auto minmax(0, 1fr);
+		display: flex;
+		flex-direction: column;
 		gap: var(--space-4);
 		height: 100%;
+		min-height: 0;
 		padding: var(--space-4);
 		border: 1px solid var(--color-border);
 		border-radius: calc(var(--radius-2xl) + 2px);
 		background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
 		box-shadow: var(--shadow-lg);
-		backdrop-filter: blur(14px);
+		backdrop-filter: blur(12px);
 	}
 
 	.sidebar-header {
@@ -866,7 +1257,7 @@
 		color: var(--color-text-primary);
 	}
 
-	.brand-subtitle {
+	:global(.brand-subtitle) {
 		font-size: var(--text-xs);
 		color: var(--color-text-secondary);
 	}
@@ -889,6 +1280,10 @@
 		cursor: pointer;
 	}
 
+	.compact-action:hover {
+		transform: translateY(-1px);
+	}
+
 	.compact-action svg {
 		width: 14px;
 		height: 14px;
@@ -906,33 +1301,97 @@
 		color: var(--color-text-secondary);
 	}
 
-	.panel-stats {
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+	:global(.panel-stats) {
+		display: flex;
+		align-items: center;
 		gap: var(--space-3);
+		padding: var(--space-2) var(--space-3);
+		border-bottom: 1px solid var(--color-border);
+		flex-wrap: nowrap;
+		overflow: hidden;
+		max-height: 32px;
 	}
 
-	.panel-stats div {
-		display: grid;
-		gap: 2px;
-		padding: var(--space-3);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-lg);
-		background: var(--color-bg-base);
+	.sidebar-tabs {
+		display: flex;
+		flex-direction: row;
+		width: 100%;
+		margin: 0;
+		padding: 0;
+		gap: 0;
+		border-bottom: 1px solid var(--color-border);
+		border-radius: 0;
+		background: transparent;
 	}
 
-	.panel-stats strong {
-		font-size: var(--text-base);
-		text-transform: capitalize;
+	.sidebar-tab {
+		flex: 1;
+		height: 36px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-1-5);
+		padding: 0 var(--space-3);
+		background: transparent;
+		border: none;
+		box-shadow: inset 0 -2px 0 transparent;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--color-text-secondary);
+		cursor: pointer;
 	}
 
-	.panel-stats span {
+	.sidebar-tab svg {
+		width: 16px;
+		height: 16px;
+	}
+
+	.sidebar-tab.active {
+		box-shadow: inset 0 -2px 0 var(--color-accent);
+		color: var(--color-text-primary);
+	}
+
+	.sidebar-tab:hover:not(.active) {
+		color: var(--color-text-primary);
+		background: var(--color-bg-overlay);
+	}
+
+	.sidebar-tab-content {
+		position: relative;
+		z-index: 0;
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		overflow: hidden;
+	}
+
+	:global(.panel-stat) {
+		display: flex;
+		align-items: center;
+		gap: var(--space-1);
 		font-size: var(--text-xs);
 		color: var(--color-text-secondary);
+		white-space: nowrap;
+	}
+
+	:global(.panel-stat svg) {
+		width: 14px;
+		height: 14px;
+		flex-shrink: 0;
+	}
+
+	:global(.panel-stat-separator) {
+		width: 3px;
+		height: 3px;
+		border-radius: 999px;
+		background: var(--color-text-muted);
+		flex-shrink: 0;
 	}
 
 	.equation-list {
 		display: grid;
+		flex: 1;
 		align-content: start;
 		gap: var(--space-3);
 		min-height: 0;
@@ -940,22 +1399,39 @@
 		padding-right: var(--space-1);
 	}
 
+	.shade-between {
+		justify-self: start;
+	}
+
+	.sidebar-footer {
+		padding-top: var(--space-2);
+		border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+	}
+
 	.empty-state {
 		display: grid;
 		justify-items: start;
 		gap: var(--space-3);
 		padding: var(--space-4);
-		border: 1px dashed var(--color-border);
+		border: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
 		border-radius: var(--radius-xl);
 		background: color-mix(in srgb, var(--color-bg-base) 80%, transparent);
 		color: var(--color-text-secondary);
 	}
 
 	.sidebar-resizer {
+		position: relative;
+		left: calc(-1 * var(--space-1-5));
 		width: 8px;
+		margin-right: calc(-1 * var(--space-1-5));
 		border-radius: var(--radius-full);
 		background: transparent;
 		cursor: col-resize;
+	}
+
+	.workspace.sidebar-collapsed .sidebar-resizer {
+		pointer-events: none;
+		opacity: 0;
 	}
 
 	.sidebar-resizer.active,
@@ -980,32 +1456,116 @@
 
 	.settings-list {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: var(--space-4);
+		gap: var(--space-3);
+		align-items: start;
+	}
+
+	.settings-category {
+		border: 1px solid color-mix(in srgb, var(--color-border) 76%, transparent);
+		border-radius: var(--radius-xl);
+		background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
+		overflow: hidden;
+	}
+
+	.settings-category-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3);
+		width: 100%;
+		padding: var(--space-3) var(--space-4);
+		text-align: left;
+		background: color-mix(in srgb, var(--color-bg-overlay) 78%, transparent);
+		border-bottom: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+	}
+
+	.settings-category-header h3 {
+		font-size: var(--text-sm);
+	}
+
+	.settings-category-header p {
+		margin-top: 2px;
+		color: var(--color-text-secondary);
+		font-size: var(--text-xs);
+	}
+
+	.settings-category-header svg {
+		width: 16px;
+		height: 16px;
+		flex-shrink: 0;
+		transition: transform var(--duration-fast) var(--ease-default);
+	}
+
+	.settings-category-header svg.collapsed {
+		transform: rotate(-90deg);
+	}
+
+	.settings-category-body {
+		display: grid;
+		padding: 0 var(--space-4);
 	}
 
 	.setting-row {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
+		display: flex;
 		align-items: center;
-		gap: var(--space-4);
-		padding: var(--space-4);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-xl);
-		background: var(--color-bg-base);
+		gap: var(--space-3);
+		padding: var(--space-3) 0;
+		border-bottom: 1px solid rgba(var(--color-border-rgb), 0.5);
+		background: transparent;
+	}
+
+	.setting-row:last-child {
+		border-bottom: none;
+	}
+
+	.setting-row-icon {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
+		color: var(--color-text-secondary);
+	}
+
+	.setting-row-icon svg {
+		width: 20px;
+		height: 20px;
 	}
 
 	.setting-copy {
 		display: grid;
 		gap: 4px;
+		flex: 1;
+		min-width: 0;
 	}
 
 	.setting-copy strong {
-		font-size: var(--text-base);
+		font-size: var(--text-sm);
 	}
 
 	.setting-copy p {
 		color: var(--color-text-secondary);
 		font-size: var(--text-sm);
+	}
+
+	.setting-row :global(.select-shell) {
+		width: 140px;
+		flex-shrink: 0;
+	}
+
+	.setting-row :global(.toggle) {
+		margin-left: auto;
+		flex-shrink: 0;
+	}
+
+	.setting-row-nested {
+		padding-left: var(--space-5);
+	}
+
+	.setting-row-nested .setting-row-icon {
+		opacity: 0.82;
+	}
+
+	.setting-row.is-disabled {
+		opacity: 0.55;
 	}
 
 	.export-grid {
@@ -1022,6 +1582,13 @@
 		background: var(--color-bg-base);
 		text-align: left;
 		cursor: pointer;
+	}
+
+	.export-card:hover {
+		border-color: color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
+		background: color-mix(in srgb, var(--color-bg-overlay) 72%, var(--color-bg-surface));
+		box-shadow: var(--shadow-md);
+		transform: translateY(-1px);
 	}
 
 	.export-card p {
@@ -1054,6 +1621,11 @@
 		font-size: var(--text-sm);
 		font-weight: var(--font-weight-medium);
 		cursor: pointer;
+	}
+
+	.action-btn:hover {
+		transform: translateY(-1px);
+		box-shadow: var(--shadow-sm);
 	}
 
 	.action-btn-primary {
@@ -1093,6 +1665,10 @@
 	}
 
 	@media (max-width: 960px) {
+		.settings-list {
+			grid-template-columns: 1fr;
+		}
+
 		:global(body) {
 			overflow: auto;
 		}
@@ -1101,10 +1677,6 @@
 			grid-template-rows: 48px auto;
 			height: auto;
 			min-height: 100svh;
-		}
-
-		.topbar {
-			overflow-x: auto;
 		}
 
 		.workspace {
@@ -1149,11 +1721,29 @@
 	}
 
 	@media (max-width: 720px) {
-		.panel-stats,
-		.export-grid,
-		.settings-list,
-		.setting-row {
+		.settings-category-header {
+			padding: var(--space-3);
+		}
+
+		.settings-category-body {
+			padding: 0 var(--space-3);
+		}
+
+		.export-grid {
 			grid-template-columns: 1fr;
+		}
+
+		:global(.panel-stats) {
+			flex-wrap: wrap;
+			max-height: none;
+		}
+
+		.setting-row {
+			align-items: flex-start;
+		}
+
+		.setting-row-nested {
+			padding-left: var(--space-4);
 		}
 
 		.sidebar-header {

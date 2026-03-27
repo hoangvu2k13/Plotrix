@@ -1,6 +1,4 @@
 import { fileURLToPath, URL } from 'node:url';
-import { constants } from 'node:zlib';
-
 import { sveltekit } from '@sveltejs/kit/vite';
 import { compression, defineAlgorithm } from 'vite-plugin-compression2';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -9,13 +7,15 @@ import { defineConfig } from 'vite';
 const resolveAlias = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
 export default defineConfig({
+	clearScreen: false,
 	resolve: {
 		alias: {
 			$components: resolveAlias('./src/lib/components'),
 			$stores: resolveAlias('./src/lib/state'),
 			$utils: resolveAlias('./src/lib/utils'),
 			$styles: resolveAlias('./src/styles')
-		}
+		},
+		dedupe: ['svelte']
 	},
 	plugins: [
 		sveltekit(),
@@ -117,28 +117,57 @@ export default defineConfig({
 				]
 			},
 			devOptions: {
-				enabled: true
+				enabled: false
 			}
 		}),
 		compression({
-			threshold: 10 * 1024,
+			threshold: 8 * 1024,
+			deleteOriginalAssets: false,
 			algorithms: [
-				defineAlgorithm('gzip', { level: 9 }),
-				defineAlgorithm('brotliCompress', {
-					params: {
-						[constants.BROTLI_PARAM_QUALITY]: 11
-					}
-				})
+				defineAlgorithm('gzip', { level: 9 })
 			]
 		})
 	],
 	optimizeDeps: {
-		include: ['mathjs', '@codemirror/view', '@codemirror/state', '@codemirror/lang-javascript']
+		include: [
+			'mathjs',
+			'katex',
+			'nanoid',
+			'@codemirror/view',
+			'@codemirror/state',
+			'@codemirror/lang-javascript'
+		]
+	},
+	esbuild: {
+		target: 'es2022',
+		legalComments: 'none',
+		charset: 'utf8'
+	},
+	css: {
+		devSourcemap: false
+	},
+	server: {
+		fs: {
+			strict: true
+		}
+	},
+	worker: {
+		format: 'es'
 	},
 	build: {
-		target: 'esnext',
-		sourcemap: true,
+		target: 'es2022',
+		sourcemap: false,
+		cssCodeSplit: true,
+		modulePreload: {
+			polyfill: true
+		},
+		reportCompressedSize: true,
+		assetsInlineLimit: 4096,
+		chunkSizeWarningLimit: 700,
+		minify: 'esbuild',
+		copyPublicDir: true,
 		rollupOptions: {
+			treeshake: true,
 			output: {
 				manualChunks(id) {
 					if (id.includes('node_modules/@codemirror')) {
@@ -147,6 +176,14 @@ export default defineConfig({
 
 					if (id.includes('node_modules/mathjs')) {
 						return 'mathjs';
+					}
+
+					if (id.includes('node_modules/katex')) {
+						return 'katex';
+					}
+
+					if (id.includes('node_modules/vite-plugin-pwa') || id.includes('workbox')) {
+						return 'pwa';
 					}
 
 					if (id.includes('node_modules')) {

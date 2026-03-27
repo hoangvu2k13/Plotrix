@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import { nanoid } from 'nanoid';
 
 	let {
 		label,
@@ -21,6 +22,7 @@
 
 	let visible = $state(false);
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	const tooltipId = `tooltip-${nanoid()}`;
 
 	function showTooltip(): void {
 		if (timer) clearTimeout(timer);
@@ -48,6 +50,7 @@
 		class={`icon-button ${variant}`}
 		class:active
 		aria-label={label}
+		aria-describedby={visible ? tooltipId : undefined}
 		{disabled}
 		style={`--button-size:${size}px;`}
 		onclick={onClick}
@@ -55,7 +58,7 @@
 		{@render children?.()}
 	</button>
 
-	<div class="tooltip" class:visible role="tooltip">{label}</div>
+	<div id={tooltipId} class="tooltip" class:visible role="tooltip">{label}</div>
 </div>
 
 <style>

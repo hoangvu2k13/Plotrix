@@ -2,11 +2,15 @@
 	let {
 		checked = false,
 		onChange = () => {},
-		label = 'Toggle'
+		label = 'Toggle',
+		ariaLabelledby,
+		disabled = false
 	} = $props<{
 		checked?: boolean;
 		onChange?: (next: boolean) => void;
 		label?: string;
+		ariaLabelledby?: string;
+		disabled?: boolean;
 	}>();
 </script>
 
@@ -14,10 +18,15 @@
 	type="button"
 	class="toggle"
 	class:checked
+	class:disabled
 	role="switch"
 	aria-checked={checked}
 	aria-label={label}
-	onclick={() => onChange(!checked)}
+	aria-labelledby={ariaLabelledby}
+	{disabled}
+	onclick={() => {
+		if (!disabled) onChange(!checked);
+	}}
 >
 	<span class="thumb"></span>
 </button>
@@ -32,11 +41,15 @@
 		border-radius: var(--radius-full);
 		background: var(--color-bg-subtle);
 		cursor: pointer;
+		transition:
+			opacity var(--duration-fast) var(--ease-default),
+			background-color var(--duration-fast) var(--ease-default),
+			border-color var(--duration-fast) var(--ease-default);
 	}
 
 	.toggle.checked {
-		border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
-		background: color-mix(in srgb, var(--color-accent) 28%, var(--color-accent-subtle));
+		border-color: var(--color-accent);
+		background: var(--color-accent);
 	}
 
 	.thumb {
@@ -51,5 +64,10 @@
 
 	.toggle.checked .thumb {
 		transform: translateX(18px);
+	}
+
+	.toggle.disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 </style>

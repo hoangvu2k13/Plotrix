@@ -1,6 +1,6 @@
-import { all, create, type EvalFunction, type MathNode } from 'mathjs';
+import { all, create, type MathNode } from 'mathjs';
 
-const math = create(all!);
+const math = create(all!, {});
 
 math.import(
 	{
@@ -51,15 +51,28 @@ const FUNCTION_TOKENS = [
 	'log',
 	'ln',
 	'exp',
+	'min',
+	'max',
+	'pow',
 	'Γ'
 ] as const;
 
-const KNOWN_IDENTIFIERS = [...FUNCTION_TOKENS, 'pi', 'e', 'x', 'y', 't'] as const;
+const KNOWN_IDENTIFIERS = [...FUNCTION_TOKENS, 'pi', 'e', 'i', 'x', 'y', 't', 'r'] as const;
+const RESERVED_VARIABLES = new Set(['x', 'y', 't', 'e', 'i', 'r']);
 const COMPOUND_IDENTIFIERS = [...KNOWN_IDENTIFIERS].sort(
 	(left, right) => right.length - left.length
 );
-const compileCache = new WeakMap<MathNode, EvalFunction>();
+export interface EvalFunction {
+	evaluate(scope: Record<string, number>): unknown;
+}
 
+const compileCache = new WeakMap<MathNode, EvalFunction>();
+const nativeCompileCache = new Map<string, EvalFunction>();
+const SAFE_EXPRESSION_CHARS = /^[0-9a-zA-Z\s+\-*/^().,_=<>!;πθΓ|]+$/;
+const BLOCKED_EXPRESSION_KEYWORDS =
+	/\b(?:import|require|fetch|document|window|eval|Function|prototype|__proto__|constructor|globalThis)\b/i;
+
+export type EquationKind = 'cartesian' | 'polar' | 'parametric' | 'implicit' | 'inequality';
 export type ExpressionSource = EvalFunction | MathNode | null;
 
 export interface ParametricNodes {
@@ -71,19 +84,33 @@ export interface ParametricNodes {
 	yRaw: string;
 }
 
+export interface InequalityNodes {
+	operator: '>' | '<' | '>=' | '<=';
+	lhsNode: MathNode;
+	rhsNode: MathNode;
+	lhsCompiled: EvalFunction;
+	rhsCompiled: EvalFunction;
+	lhsRaw: string;
+	rhsRaw: string;
+	isExplicitYBoundary: boolean;
+}
+
 export interface ParsedEquationResult {
 	node: MathNode | null;
+	compiledExpression: EvalFunction | null;
 	error: string | null;
+	kind: EquationKind;
 	isParametric: boolean;
-	inequality: string | null;
+	inequality: InequalityNodes | null;
 	parametric: ParametricNodes | null;
 	normalized: string;
+	freeVariables: string[];
 }
 
 export interface EquationSamplerInput {
 	compiled: MathNode | null;
 	compiledExpression: EvalFunction | null;
-	isParametric: boolean;
+	kind: EquationKind;
 	paramRange: [number, number];
 	parametricNodes: ParametricNodes | null;
 }
@@ -93,11 +120,15 @@ function isNumberToken(token: string): boolean {
 }
 
 function isIdentifierToken(token: string): boolean {
-	return /^[A-Za-zΓ_][A-Za-z0-9_]*$/.test(token);
+	return /^[A-Za-zΓ_θ][A-Za-z0-9_]*$/.test(token);
 }
 
 function splitCompoundIdentifier(token: string): string[] {
 	if (KNOWN_IDENTIFIERS.includes(token as (typeof KNOWN_IDENTIFIERS)[number])) {
+		return [token];
+	}
+
+	if (token.length === 1 || token === 'θ') {
 		return [token];
 	}
 
@@ -124,7 +155,7 @@ function splitCompoundIdentifier(token: string): string[] {
 function tokenize(expression: string): string[] {
 	const matches =
 		expression.match(
-			/(?:\d*\.\d+|\d+\.?\d*|[A-Za-zΓ_][A-Za-z0-9_]*|<=|>=|==|!=|[()+\-*/^,;<>])/g
+			/(?:\d*\.\d+|\d+\.?\d*|[A-Za-zΓ_θ][A-Za-z0-9_]*|<=|>=|==|!=|[()+\-*/^,;=<>])/g
 		) ?? [];
 
 	return matches.flatMap((token) =>
@@ -141,7 +172,10 @@ function canStartValue(token: string): boolean {
 }
 
 function normalizeImplicitMultiplication(expression: string): string {
-	const cleaned = expression.replace(/\s+/g, '').replaceAll('π', 'pi');
+	const cleaned = expression
+		.replace(/\s+/g, '')
+		.replaceAll('π', 'pi')
+		.replaceAll('θ', 't');
 	const tokens = tokenize(cleaned);
 
 	if (!tokens.length) {
@@ -167,11 +201,29 @@ function normalizeImplicitMultiplication(expression: string): string {
 	return result.join('');
 }
 
-function stripPrefix(raw: string): string {
+export function isSafeExpressionInput(raw: string): boolean {
 	const trimmed = raw.trim();
 
-	if (/^(?:y|[a-z]\(\s*x\s*\))\s*=/.test(trimmed)) {
+	if (!trimmed) {
+		return true;
+	}
+
+	if (!SAFE_EXPRESSION_CHARS.test(trimmed)) {
+		return false;
+	}
+
+	return !BLOCKED_EXPRESSION_KEYWORDS.test(trimmed);
+}
+
+function stripPrefix(raw: string, kind: EquationKind): string {
+	const trimmed = raw.trim();
+
+	if (kind === 'cartesian' && /^(?:y|[a-z]\(\s*x\s*\))\s*=/.test(trimmed)) {
 		return trimmed.replace(/^(?:y|[a-z]\(\s*x\s*\))\s*=\s*/i, '');
+	}
+
+	if (kind === 'polar' && /^(?:r|θ)\s*=/.test(trimmed)) {
+		return trimmed.replace(/^(?:r|θ)\s*=\s*/i, '');
 	}
 
 	return trimmed;
@@ -198,22 +250,24 @@ function compileNode(source: ExpressionSource): EvalFunction | null {
 
 	const compiled = node.compile();
 	compileCache.set(node, compiled);
-
 	return compiled;
 }
 
-function safeEvaluateCompiled(
-	compiled: EvalFunction,
-	scope: Record<string, number>
-): number | null {
-	try {
-		return toFiniteNumber(compiled.evaluate(scope));
-	} catch {
-		return null;
+function compileNativeExpression(source: string, _variables: string[] = []): EvalFunction {
+	const normalized = source.trim();
+	const cacheKey = normalized;
+	const cached = nativeCompileCache.get(cacheKey);
+
+	if (cached) {
+		return cached;
 	}
+
+	const compiled = math.parse(normalized).compile() as EvalFunction;
+	nativeCompileCache.set(cacheKey, compiled);
+	return compiled;
 }
 
-function toFiniteNumber(value: unknown): number | null {
+export function toFiniteNumber(value: unknown): number | null {
 	if (typeof value === 'number') {
 		return Number.isFinite(value) ? value : null;
 	}
@@ -241,9 +295,20 @@ function toFiniteNumber(value: unknown): number | null {
 	return null;
 }
 
-function evaluate(
+function safeEvaluateCompiled(
+	compiled: EvalFunction,
+	scope: Record<string, number>
+): number | null {
+	try {
+		return toFiniteNumber(compiled.evaluate(scope));
+	} catch {
+		return null;
+	}
+}
+
+function evaluateWithVariable(
 	source: ExpressionSource,
-	variable: 'x' | 't',
+	variable: 'x' | 'y' | 't',
 	value: number,
 	scope: Record<string, number> = {}
 ): number | null {
@@ -256,7 +321,19 @@ function evaluate(
 	return safeEvaluateCompiled(compiled, { ...scope, [variable]: value });
 }
 
-function evaluateParametric(nodes: ParametricNodes, t: number, scope: Record<string, number> = {}) {
+export function evaluateCompiledWithScope(
+	source: ExpressionSource,
+	scope: Record<string, number>
+): number | null {
+	const compiled = compileNode(source);
+	return compiled ? safeEvaluateCompiled(compiled, scope) : null;
+}
+
+export function evaluateParametric(
+	nodes: ParametricNodes,
+	t: number,
+	scope: Record<string, number> = {}
+) {
 	try {
 		const x = toFiniteNumber(nodes.xCompiled.evaluate({ ...scope, t }));
 		const y = toFiniteNumber(nodes.yCompiled.evaluate({ ...scope, t }));
@@ -366,110 +443,352 @@ function refineParametric(
 	points.push(p1.x, p1.y);
 }
 
-export function parseEquation(raw: string): ParsedEquationResult {
+function parseNode(source: string): { node: MathNode | null; error: string | null } {
+	try {
+		return { node: math.parse(source), error: null };
+	} catch (error) {
+		return {
+			node: null,
+			error: error instanceof Error ? error.message : 'Unable to parse expression.'
+		};
+	}
+}
+
+function validateIdentifiers(tokens: string[]): string | null {
+	for (const token of tokens) {
+		if (!isIdentifierToken(token)) {
+			continue;
+		}
+
+		if (KNOWN_IDENTIFIERS.includes(token as (typeof KNOWN_IDENTIFIERS)[number])) {
+			continue;
+		}
+
+		if (token === 'θ' || token.length === 1) {
+			continue;
+		}
+
+		return token;
+	}
+
+	return null;
+}
+
+function extractVariablesFromRaw(raw: string): string[] {
+	const matches = raw.match(/[A-Za-z]/g) ?? [];
+	return [...new Set(matches)]
+		.map((value) => value.toLowerCase())
+		.filter(
+			(value) => value.length === 1 && !RESERVED_VARIABLES.has(value) && !FUNCTION_TOKENS.includes(value as never)
+		)
+		.sort();
+}
+
+export function extractFreeVariables(raw: string, node?: MathNode | null): string[] {
+	if (!node) {
+		return extractVariablesFromRaw(raw);
+	}
+
+	const variables = new Set<string>();
+	node.traverse((current, path, parent) => {
+		if (current.type !== 'SymbolNode') {
+			return;
+		}
+
+		const name = String((current as unknown as { name: string }).name);
+
+		if (name.length !== 1 || RESERVED_VARIABLES.has(name)) {
+			return;
+		}
+
+		if (parent?.type === 'FunctionNode' && path === 'fn') {
+			return;
+		}
+
+		variables.add(name);
+	});
+
+	return [...variables].sort();
+}
+
+function parseParametric(raw: string): ParsedEquationResult {
+	const trimmed = raw.trim();
+	const match =
+		trimmed.match(/x\s*\(\s*t\s*\)\s*=\s*([^;\n]+)\s*[;,\n]\s*y\s*\(\s*t\s*\)\s*=\s*(.+)$/i) ??
+		trimmed.match(/y\s*\(\s*t\s*\)\s*=\s*([^;\n]+)\s*[;,\n]\s*x\s*\(\s*t\s*\)\s*=\s*(.+)$/i);
+
+	if (!match) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: 'Use x(t)=...; y(t)=... for parametric curves.',
+			kind: 'parametric',
+			isParametric: true,
+			inequality: null,
+			parametric: null,
+			normalized: '',
+			freeVariables: []
+		};
+	}
+
+	const xRaw = normalizeImplicitMultiplication(match[1]!);
+	const yRaw = normalizeImplicitMultiplication(match[2]!);
+	const invalid = validateIdentifiers([...tokenize(xRaw), ...tokenize(yRaw)]);
+
+	if (invalid) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: `Unknown symbol "${invalid}".`,
+			kind: 'parametric',
+			isParametric: true,
+			inequality: null,
+			parametric: null,
+			normalized: `${xRaw};${yRaw}`,
+			freeVariables: []
+		};
+	}
+
+	try {
+		const xNode = math.parse(xRaw);
+		const yNode = math.parse(yRaw);
+		return {
+			node: null,
+			compiledExpression: null,
+			error: null,
+			kind: 'parametric',
+			isParametric: true,
+			inequality: null,
+			parametric: {
+				xNode,
+				yNode,
+				xCompiled: compileNativeExpression(xRaw, extractFreeVariables(xRaw, xNode)),
+				yCompiled: compileNativeExpression(yRaw, extractFreeVariables(yRaw, yNode)),
+				xRaw,
+				yRaw
+			},
+			normalized: `${xRaw};${yRaw}`,
+			freeVariables: [
+				...new Set([...extractFreeVariables(xRaw, xNode), ...extractFreeVariables(yRaw, yNode)])
+			].sort()
+		};
+	} catch (error) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: error instanceof Error ? error.message : 'Unable to parse parametric equation.',
+			kind: 'parametric',
+			isParametric: true,
+			inequality: null,
+			parametric: null,
+			normalized: `${xRaw};${yRaw}`,
+			freeVariables: []
+		};
+	}
+}
+
+function parseInequality(raw: string): ParsedEquationResult {
+	const trimmed = raw.trim();
+	const match = trimmed.match(/^(.*?)(<=|>=|<|>)(.*)$/);
+
+	if (!match) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: 'Unable to parse inequality.',
+			kind: 'inequality',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: trimmed,
+			freeVariables: []
+		};
+	}
+
+	const lhsRaw = normalizeImplicitMultiplication(match[1]!);
+	const rhsRaw = normalizeImplicitMultiplication(match[3]!);
+	const invalid = validateIdentifiers([...tokenize(lhsRaw), ...tokenize(rhsRaw)]);
+
+	if (invalid) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: `Unknown symbol "${invalid}".`,
+			kind: 'inequality',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: `${lhsRaw}${match[2]}${rhsRaw}`,
+			freeVariables: []
+		};
+	}
+
+	const lhs = parseNode(lhsRaw);
+	const rhs = parseNode(rhsRaw);
+
+	if (!lhs.node || !rhs.node) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: lhs.error ?? rhs.error,
+			kind: 'inequality',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: `${lhsRaw}${match[2]}${rhsRaw}`,
+			freeVariables: []
+		};
+	}
+
+	const node = math.parse(`(${lhsRaw}) - (${rhsRaw})`);
+	return {
+		node,
+		compiledExpression: compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`, extractFreeVariables(`${lhsRaw}${rhsRaw}`, node)),
+		error: null,
+		kind: 'inequality',
+		isParametric: false,
+		inequality: {
+			operator: match[2] as InequalityNodes['operator'],
+			lhsNode: lhs.node,
+			rhsNode: rhs.node,
+			lhsCompiled: compileNativeExpression(lhsRaw, extractFreeVariables(lhsRaw, lhs.node)),
+			rhsCompiled: compileNativeExpression(rhsRaw, extractFreeVariables(rhsRaw, rhs.node)),
+			lhsRaw,
+			rhsRaw,
+			isExplicitYBoundary: lhsRaw === 'y' || rhsRaw === 'y'
+		},
+		parametric: null,
+		normalized: `${lhsRaw}${match[2]}${rhsRaw}`,
+		freeVariables: [
+			...new Set([...extractFreeVariables(lhsRaw, lhs.node), ...extractFreeVariables(rhsRaw, rhs.node)])
+		].sort()
+	};
+}
+
+function parseImplicit(raw: string): ParsedEquationResult {
+	const trimmed = raw.trim();
+	const match = trimmed.match(/^(.*)=(.*)$/);
+
+	if (!match) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: 'Use lhs = rhs for implicit equations.',
+			kind: 'implicit',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: trimmed,
+			freeVariables: []
+		};
+	}
+
+	const lhsRaw = normalizeImplicitMultiplication(match[1]!);
+	const rhsRaw = normalizeImplicitMultiplication(match[2]!);
+	const invalid = validateIdentifiers([...tokenize(lhsRaw), ...tokenize(rhsRaw)]);
+
+	if (invalid) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: `Unknown symbol "${invalid}".`,
+			kind: 'implicit',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: `${lhsRaw}=${rhsRaw}`,
+			freeVariables: []
+		};
+	}
+
+	const parsed = parseNode(`(${lhsRaw}) - (${rhsRaw})`);
+	return {
+		node: parsed.node,
+		compiledExpression: parsed.node
+			? compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`, extractFreeVariables(`${lhsRaw}${rhsRaw}`, parsed.node))
+			: null,
+		error: parsed.error,
+		kind: 'implicit',
+		isParametric: false,
+		inequality: null,
+		parametric: null,
+		normalized: `${lhsRaw}=${rhsRaw}`,
+		freeVariables: extractFreeVariables(`${lhsRaw}${rhsRaw}`, parsed.node)
+	};
+}
+
+export function parseEquation(raw: string, kind: EquationKind = 'cartesian'): ParsedEquationResult {
 	const trimmed = raw.trim();
 
 	if (!trimmed) {
 		return {
 			node: null,
+			compiledExpression: null,
 			error: 'Type an expression to plot.',
-			isParametric: false,
+			kind,
+			isParametric: kind === 'parametric',
 			inequality: null,
 			parametric: null,
-			normalized: ''
+			normalized: '',
+			freeVariables: []
 		};
 	}
 
-	const parametricMatch =
-		trimmed.match(/x\s*\(\s*t\s*\)\s*=\s*([^;\n]+)\s*[;,\n]\s*y\s*\(\s*t\s*\)\s*=\s*(.+)$/i) ??
-		trimmed.match(/y\s*\(\s*t\s*\)\s*=\s*([^;\n]+)\s*[;,\n]\s*x\s*\(\s*t\s*\)\s*=\s*(.+)$/i);
-
-	if (parametricMatch) {
-		const xRaw = normalizeImplicitMultiplication(parametricMatch[1]!);
-		const yRaw = normalizeImplicitMultiplication(parametricMatch[2]!);
-
-		try {
-			const xNode = math.parse(xRaw);
-			const yNode = math.parse(yRaw);
-			return {
-				node: null,
-				error: null,
-				isParametric: true,
-				inequality: null,
-				parametric: {
-					xNode,
-					yNode,
-					xCompiled: xNode.compile(),
-					yCompiled: yNode.compile(),
-					xRaw,
-					yRaw
-				},
-				normalized: `${xRaw};${yRaw}`
-			};
-		} catch (error) {
-			return {
-				node: null,
-				error: error instanceof Error ? error.message : 'Unable to parse parametric equation.',
-				isParametric: true,
-				inequality: null,
-				parametric: null,
-				normalized: `${xRaw};${yRaw}`
-			};
-		}
-	}
-
-	const inequality = trimmed.match(/<=|>=|<|>/)?.[0] ?? null;
-
-	if (inequality) {
+	if (!isSafeExpressionInput(trimmed)) {
 		return {
 			node: null,
-			error: 'Inequality shading is reserved for a future Plotrix update.',
-			isParametric: false,
-			inequality,
+			compiledExpression: null,
+			error: 'Expression contains unsupported or unsafe tokens.',
+			kind,
+			isParametric: kind === 'parametric',
+			inequality: null,
 			parametric: null,
-			normalized: trimmed
+			normalized: '',
+			freeVariables: []
 		};
 	}
 
-	const normalized = normalizeImplicitMultiplication(stripPrefix(trimmed));
-	const unknownIdentifiers = tokenize(normalized).filter(
-		(token) =>
-			isIdentifierToken(token) &&
-			!KNOWN_IDENTIFIERS.includes(token as (typeof KNOWN_IDENTIFIERS)[number])
-	);
+	if (kind === 'parametric') {
+		return parseParametric(trimmed);
+	}
 
-	if (unknownIdentifiers.length) {
-		const symbol = unknownIdentifiers[0]!;
+	if (kind === 'inequality' || /<=|>=|<|>/.test(trimmed)) {
+		return parseInequality(trimmed);
+	}
+
+	if (kind === 'implicit') {
+		return parseImplicit(trimmed);
+	}
+
+	const normalized = normalizeImplicitMultiplication(stripPrefix(trimmed, kind));
+	const invalid = validateIdentifiers(tokenize(normalized));
+
+	if (invalid) {
 		return {
 			node: null,
-			error: `Unknown symbol "${symbol}".`,
+			compiledExpression: null,
+			error: `Unknown symbol "${invalid}".`,
+			kind,
 			isParametric: false,
 			inequality: null,
 			parametric: null,
-			normalized
+			normalized,
+			freeVariables: []
 		};
 	}
 
-	try {
-		const node = math.parse(normalized);
-		return {
-			node,
-			error: null,
-			isParametric: false,
-			inequality: null,
-			parametric: null,
-			normalized
-		};
-	} catch (error) {
-		return {
-			node: null,
-			error: error instanceof Error ? error.message : 'Unable to parse equation.',
-			isParametric: false,
-			inequality: null,
-			parametric: null,
-			normalized
-		};
-	}
+	const parsed = parseNode(normalized);
+	return {
+		node: parsed.node,
+		compiledExpression: parsed.node ? compileNativeExpression(normalized, extractFreeVariables(normalized, parsed.node)) : null,
+		error: parsed.error,
+		kind,
+		isParametric: false,
+		inequality: null,
+		parametric: null,
+		normalized,
+		freeVariables: extractFreeVariables(normalized, parsed.node)
+	};
 }
 
 export function evaluateSampled(
@@ -477,7 +796,8 @@ export function evaluateSampled(
 	xMin: number,
 	xMax: number,
 	samples: number,
-	scope: Record<string, number> = {}
+	scope: Record<string, number> = {},
+	variable: 'x' | 't' = 'x'
 ): Float64Array[] {
 	const compiled = compileNode(source);
 
@@ -493,7 +813,7 @@ export function evaluateSampled(
 
 	for (let index = 0; index < samples; index += 1) {
 		const x = xMin + step * index;
-		const y = safeEvaluateCompiled(compiled, { ...scope, x });
+		const y = safeEvaluateCompiled(compiled, { ...scope, [variable]: x });
 
 		if (y === null || Math.abs(y) > 1_000_000) {
 			pushSegment(segments, points);
@@ -505,7 +825,7 @@ export function evaluateSampled(
 
 		if (previousX !== null && previousY !== null) {
 			const midpointX = (previousX + x) / 2;
-			const midpointY = safeEvaluateCompiled(compiled, { ...scope, x: midpointX });
+			const midpointY = safeEvaluateCompiled(compiled, { ...scope, [variable]: midpointX });
 
 			if (isDiscontinuity(previousY, midpointY, y)) {
 				pushSegment(segments, points);
@@ -522,7 +842,6 @@ export function evaluateSampled(
 	}
 
 	pushSegment(segments, points);
-
 	return segments;
 }
 
@@ -532,7 +851,8 @@ export function adaptiveSample(
 	xMax: number,
 	baseN: number,
 	maxN: number,
-	scope: Record<string, number> = {}
+	scope: Record<string, number> = {},
+	variable: 'x' | 't' = 'x'
 ): Float64Array[] {
 	const compiled = compileNode(source);
 
@@ -540,12 +860,12 @@ export function adaptiveSample(
 		return [];
 	}
 
-	const coarse = evaluateSampled(compiled, xMin, xMax, baseN, scope);
+	const coarse = evaluateSampled(compiled, xMin, xMax, baseN, scope, variable);
 
 	return coarse.map((segment) => {
 		const points = Array.from(segment);
 
-		if (points.length <= 4) {
+		if (points.length <= 4 || variable !== 'x') {
 			return segment;
 		}
 
@@ -636,18 +956,45 @@ export function sampleEquation(
 	maxN = 640,
 	scope: Record<string, number> = {}
 ): Float64Array[] {
-	if (input.isParametric && input.parametricNodes) {
+	const safeBaseN = Math.min(Math.max(baseN, 48), 1200);
+	const safeMaxN = Math.max(safeBaseN, maxN);
+
+	if (input.kind === 'parametric' && input.parametricNodes) {
 		return sampleParametric(
 			input.parametricNodes,
 			input.paramRange[0],
 			input.paramRange[1],
-			baseN,
-			maxN,
+			safeBaseN,
+			safeMaxN,
 			scope
 		);
 	}
 
-	return adaptiveSample(input.compiledExpression ?? input.compiled, xMin, xMax, baseN, maxN, scope);
+	if (input.kind === 'polar') {
+		return adaptiveSample(
+			input.compiledExpression ?? input.compiled,
+			xMin,
+			xMax,
+			safeBaseN,
+			safeMaxN,
+			scope,
+			't'
+		);
+	}
+
+	if (input.kind === 'inequality' || input.kind === 'implicit') {
+		return [];
+	}
+
+	return adaptiveSample(
+		input.compiledExpression ?? input.compiled,
+		xMin,
+		xMax,
+		safeBaseN,
+		safeMaxN,
+		scope,
+		'x'
+	);
 }
 
 export function evaluateCartesianAt(
@@ -655,11 +1002,44 @@ export function evaluateCartesianAt(
 	x: number,
 	scope: Record<string, number> = {}
 ): number | null {
-	return evaluate(source, 'x', x, scope);
+	return evaluateWithVariable(source, 'x', x, scope);
 }
 
-export function toLatex(raw: string): string {
-	const parsed = parseEquation(raw);
+export function evaluatePolarAt(
+	source: ExpressionSource,
+	t: number,
+	scope: Record<string, number> = {}
+): number | null {
+	return evaluateWithVariable(source, 't', t, scope);
+}
+
+export function evaluateImplicitAt(
+	source: ExpressionSource,
+	x: number,
+	y: number,
+	scope: Record<string, number> = {}
+): number | null {
+	return evaluateCompiledWithScope(source, { ...scope, x, y });
+}
+
+export function evaluateInequalityBoundaryAt(
+	inequality: InequalityNodes,
+	x: number,
+	scope: Record<string, number> = {}
+): number | null {
+	if (inequality.lhsRaw === 'y') {
+		return safeEvaluateCompiled(inequality.rhsCompiled, { ...scope, x });
+	}
+
+	if (inequality.rhsRaw === 'y') {
+		return safeEvaluateCompiled(inequality.lhsCompiled, { ...scope, x });
+	}
+
+	return null;
+}
+
+export function toLatex(raw: string, kind: EquationKind = 'cartesian'): string {
+	const parsed = parseEquation(raw, kind);
 
 	if (parsed.node) {
 		try {
@@ -677,7 +1057,16 @@ export function toLatex(raw: string): string {
 		}
 	}
 
+	if (parsed.inequality) {
+		try {
+			return `${parsed.inequality.lhsNode.toTex({ parenthesis: 'auto' })}${parsed.inequality.operator}${parsed.inequality.rhsNode.toTex({ parenthesis: 'auto' })}`;
+		} catch {
+			return raw;
+		}
+	}
+
 	return raw;
 }
 
-export type { EvalFunction, MathNode };
+export { math };
+export type { MathNode };

@@ -1,0 +1,467 @@
+import { all, create } from 'mathjs';
+
+const math = create(all!, {});
+
+export type RegressionModel =
+	| 'linear'
+	| 'polynomial'
+	| 'exponential'
+	| 'logarithmic'
+	| 'power'
+	| 'sinusoidal'
+	| 'custom';
+
+export interface RegressionMetrics {
+	r2: number;
+	rmse: number;
+	mae: number;
+}
+
+export interface RegressionResult {
+	model: RegressionModel;
+	equation: string;
+	latex: string;
+	metrics: RegressionMetrics;
+	coefficients: number[];
+	metadata?: Record<string, number | string>;
+}
+
+export interface RegressionDataset {
+	x: number[];
+	y: number[];
+}
+
+function mean(values: number[]): number {
+	return values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+}
+
+function computeMetrics(actual: number[], predicted: number[]): RegressionMetrics {
+	const average = mean(actual);
+	let residual = 0;
+	let total = 0;
+	let absolute = 0;
+
+	for (let index = 0; index < actual.length; index += 1) {
+		const diff = actual[index]! - predicted[index]!;
+		residual += diff * diff;
+		total += (actual[index]! - average) ** 2;
+		absolute += Math.abs(diff);
+	}
+
+	return {
+		r2: total <= 1e-12 ? 1 : 1 - residual / total,
+		rmse: Math.sqrt(residual / Math.max(actual.length, 1)),
+		mae: absolute / Math.max(actual.length, 1)
+	};
+}
+
+function gaussianSolve(matrix: number[][], vector: number[]): number[] {
+	const size = vector.length;
+	const a = matrix.map((row) => [...row]);
+	const b = [...vector];
+
+	for (let pivot = 0; pivot < size; pivot += 1) {
+		let maxRow = pivot;
+
+		for (let row = pivot + 1; row < size; row += 1) {
+			if (Math.abs(a[row]![pivot]!) > Math.abs(a[maxRow]![pivot]!)) {
+				maxRow = row;
+			}
+		}
+
+		if (maxRow !== pivot) {
+			[a[pivot], a[maxRow]] = [a[maxRow]!, a[pivot]!];
+			[b[pivot], b[maxRow]] = [b[maxRow]!, b[pivot]!];
+		}
+
+		const divisor = a[pivot]![pivot]!;
+
+		if (Math.abs(divisor) < 1e-12) {
+			continue;
+		}
+
+		const pivotRow = a[pivot]!;
+		for (let column = pivot; column < size; column += 1) {
+			pivotRow[column] = (pivotRow[column] ?? 0) / divisor;
+		}
+		b[pivot] = (b[pivot] ?? 0) / divisor;
+
+		for (let row = 0; row < size; row += 1) {
+			if (row === pivot) {
+				continue;
+			}
+
+			const factor = a[row]![pivot] ?? 0;
+
+			for (let column = pivot; column < size; column += 1) {
+				a[row]![column] = (a[row]![column] ?? 0) - factor * (a[pivot]![column] ?? 0);
+			}
+
+			b[row] = (b[row] ?? 0) - factor * (b[pivot] ?? 0);
+		}
+	}
+
+	return b;
+}
+
+function linearRegression(dataset: RegressionDataset): RegressionResult {
+	const { x, y } = dataset;
+	const xMean = mean(x);
+	const yMean = mean(y);
+	let numerator = 0;
+	let denominator = 0;
+
+	for (let index = 0; index < x.length; index += 1) {
+		numerator += (x[index]! - xMean) * (y[index]! - yMean);
+		denominator += (x[index]! - xMean) ** 2;
+	}
+
+	const slope = denominator === 0 ? 0 : numerator / denominator;
+	const intercept = yMean - slope * xMean;
+	const predicted = x.map((value) => slope * value + intercept);
+
+	return {
+		model: 'linear',
+		equation: `y = ${slope.toPrecision(6)} * x + ${intercept.toPrecision(6)}`,
+		latex: `y = ${slope.toPrecision(4)}x + ${intercept.toPrecision(4)}`,
+		metrics: computeMetrics(y, predicted),
+		coefficients: [slope, intercept]
+	};
+}
+
+function polynomialRegression(dataset: RegressionDataset, degree: number): RegressionResult {
+	const { x, y } = dataset;
+	const size = degree + 1;
+	const xtx = Array.from({ length: size }, () => Array(size).fill(0));
+	const xty = Array(size).fill(0);
+
+	for (let row = 0; row < x.length; row += 1) {
+		const powers = Array.from({ length: size }, (_, index) => x[row]! ** index);
+
+		for (let i = 0; i < size; i += 1) {
+			xty[i] += powers[i]! * y[row]!;
+
+			for (let j = 0; j < size; j += 1) {
+				xtx[i]![j] += powers[i]! * powers[j]!;
+			}
+		}
+	}
+
+	const coefficients = gaussianSolve(xtx, xty);
+	const predicted = x.map((value) =>
+		coefficients.reduce((sum, coefficient, index) => sum + coefficient * value ** index, 0)
+	);
+	const terms = coefficients
+		.map((coefficient, index) => `${coefficient.toPrecision(6)}${index === 0 ? '' : `*x^${index}`}`)
+		.join(' + ');
+	const latex = coefficients
+		.map((coefficient, index) =>
+			index === 0 ? coefficient.toPrecision(4) : `${coefficient.toPrecision(4)}x^{${index}}`
+		)
+		.join(' + ');
+
+	return {
+		model: 'polynomial',
+		equation: `y = ${terms}`,
+		latex: `y = ${latex}`,
+		metrics: computeMetrics(y, predicted),
+		coefficients,
+		metadata: { degree }
+	};
+}
+
+function transformedLinearRegression(
+	x: number[],
+	y: number[],
+	xTransform: (value: number) => number | null,
+	yTransform: (value: number) => number | null
+): { slope: number; intercept: number; originalX: number[]; originalY: number[] } {
+	const transformedX: number[] = [];
+	const transformedY: number[] = [];
+	const originalX: number[] = [];
+	const originalY: number[] = [];
+
+	for (let index = 0; index < x.length; index += 1) {
+		const nextX = xTransform(x[index]!);
+		const nextY = yTransform(y[index]!);
+
+		if (nextX === null || nextY === null || !Number.isFinite(nextX) || !Number.isFinite(nextY)) {
+			continue;
+		}
+
+		transformedX.push(nextX);
+		transformedY.push(nextY);
+		originalX.push(x[index]!);
+		originalY.push(y[index]!);
+	}
+
+	const result = linearRegression({ x: transformedX, y: transformedY });
+	return {
+		slope: result.coefficients[0]!,
+		intercept: result.coefficients[1]!,
+		originalX,
+		originalY
+	};
+}
+
+function exponentialRegression(dataset: RegressionDataset): RegressionResult {
+	const transformed = transformedLinearRegression(dataset.x, dataset.y, (value) => value, (value) =>
+		value > 0 ? Math.log(value) : null
+	);
+	const a = Math.exp(transformed.intercept);
+	const b = transformed.slope;
+	const predicted = transformed.originalX.map((value) => a * Math.exp(b * value));
+
+	return {
+		model: 'exponential',
+		equation: `y = ${a.toPrecision(6)} * exp(${b.toPrecision(6)} * x)`,
+		latex: `y = ${a.toPrecision(4)}e^{${b.toPrecision(4)}x}`,
+		metrics: computeMetrics(transformed.originalY, predicted),
+		coefficients: [a, b]
+	};
+}
+
+function logarithmicRegression(dataset: RegressionDataset): RegressionResult {
+	const transformed = transformedLinearRegression(
+		dataset.x,
+		dataset.y,
+		(value) => (value > 0 ? Math.log(value) : null),
+		(value) => value
+	);
+	const a = transformed.slope;
+	const b = transformed.intercept;
+	const predicted = transformed.originalX.map((value) => a * Math.log(value) + b);
+
+	return {
+		model: 'logarithmic',
+		equation: `y = ${a.toPrecision(6)} * ln(x) + ${b.toPrecision(6)}`,
+		latex: `y = ${a.toPrecision(4)}\\ln(x) + ${b.toPrecision(4)}`,
+		metrics: computeMetrics(transformed.originalY, predicted),
+		coefficients: [a, b]
+	};
+}
+
+function powerRegression(dataset: RegressionDataset): RegressionResult {
+	const transformed = transformedLinearRegression(
+		dataset.x,
+		dataset.y,
+		(value) => (value > 0 ? Math.log(value) : null),
+		(value) => (value > 0 ? Math.log(value) : null)
+	);
+	const a = Math.exp(transformed.intercept);
+	const b = transformed.slope;
+	const predicted = transformed.originalX.map((value) => a * value ** b);
+
+	return {
+		model: 'power',
+		equation: `y = ${a.toPrecision(6)} * x^${b.toPrecision(6)}`,
+		latex: `y = ${a.toPrecision(4)}x^{${b.toPrecision(4)}}`,
+		metrics: computeMetrics(transformed.originalY, predicted),
+		coefficients: [a, b]
+	};
+}
+
+function estimateFrequency(x: number[], y: number[]): number {
+	let zeroCrossings = 0;
+
+	for (let index = 1; index < y.length; index += 1) {
+		if (Math.sign(y[index - 1]!) !== Math.sign(y[index]!)) {
+			zeroCrossings += 1;
+		}
+	}
+
+	const span = Math.max(1e-6, x[x.length - 1]! - x[0]!);
+	return Math.max(1e-3, (zeroCrossings / 2) * ((2 * Math.PI) / span));
+}
+
+function sinusoidalRegression(dataset: RegressionDataset): RegressionResult {
+	const { x, y } = dataset;
+	const yMax = Math.max(...y);
+	const yMin = Math.min(...y);
+	let a = (yMax - yMin) / 2;
+	let d = (yMax + yMin) / 2;
+	let b = estimateFrequency(x, y.map((value) => value - d));
+	let c = 0;
+	let velocity = [0, 0, 0, 0];
+
+	for (let iteration = 0; iteration < 500; iteration += 1) {
+		let gradA = 0;
+		let gradB = 0;
+		let gradC = 0;
+		let gradD = 0;
+
+		for (let index = 0; index < x.length; index += 1) {
+			const angle = b * x[index]! + c;
+			const prediction = a * Math.sin(angle) + d;
+			const error = prediction - y[index]!;
+			gradA += 2 * error * Math.sin(angle);
+			gradB += 2 * error * a * Math.cos(angle) * x[index]!;
+			gradC += 2 * error * a * Math.cos(angle);
+			gradD += 2 * error;
+		}
+
+		const lr = 1e-4 / Math.max(1, x.length);
+		const gradients = [gradA, gradB, gradC, gradD];
+		velocity = velocity.map((value, index) => value * 0.9 - gradients[index]! * lr);
+		a += velocity[0]!;
+		b += velocity[1]!;
+		c += velocity[2]!;
+		d += velocity[3]!;
+	}
+
+	const predicted = x.map((value) => a * Math.sin(b * value + c) + d);
+
+	return {
+		model: 'sinusoidal',
+		equation: `y = ${a.toPrecision(6)} * sin(${b.toPrecision(6)} * x + ${c.toPrecision(6)}) + ${d.toPrecision(6)}`,
+		latex: `y = ${a.toPrecision(4)}\\sin(${b.toPrecision(4)}x + ${c.toPrecision(4)}) + ${d.toPrecision(4)}`,
+		metrics: computeMetrics(y, predicted),
+		coefficients: [a, b, c, d]
+	};
+}
+
+function matrixMultiplyTransposeJ(jacobian: number[][]): number[][] {
+	const columns = jacobian[0]?.length ?? 0;
+	const matrix = Array.from({ length: columns }, () => Array(columns).fill(0));
+
+	for (let row = 0; row < jacobian.length; row += 1) {
+		for (let col = 0; col < columns; col += 1) {
+			for (let inner = 0; inner < columns; inner += 1) {
+				matrix[col]![inner] += jacobian[row]![col]! * jacobian[row]![inner]!;
+			}
+		}
+	}
+
+	return matrix;
+}
+
+function matrixVectorMultiplyTranspose(jacobian: number[][], residuals: number[]): number[] {
+	const columns = jacobian[0]?.length ?? 0;
+	const vector = Array(columns).fill(0);
+
+	for (let row = 0; row < jacobian.length; row += 1) {
+		for (let col = 0; col < columns; col += 1) {
+			vector[col] += jacobian[row]![col]! * residuals[row]!;
+		}
+	}
+
+	return vector;
+}
+
+function customRegression(dataset: RegressionDataset, expression: string): RegressionResult {
+	const parsed = math.parse(expression);
+	const symbols = new Set<string>();
+	parsed.traverse((node, path, parent) => {
+		if (node.type === 'SymbolNode') {
+			const name = String((node as unknown as { name: string }).name);
+
+			if (name !== 'x' && name.length === 1 && parent?.type !== 'FunctionNode') {
+				symbols.add(name);
+			}
+		}
+	});
+	const names = [...symbols].sort();
+	const compiled = parsed.compile();
+	let params = Object.fromEntries(names.map((name, index) => [name, index === 0 ? 1 : 0]));
+	let lambda = 0.01;
+
+	const rss = (candidate: Record<string, number>): { value: number; predicted: number[] } => {
+		let value = 0;
+		const predicted: number[] = [];
+
+		for (let index = 0; index < dataset.x.length; index += 1) {
+			const output = Number(compiled.evaluate({ ...candidate, x: dataset.x[index]! }));
+			const error = dataset.y[index]! - output;
+			value += error * error;
+			predicted.push(output);
+		}
+
+		return { value, predicted };
+	};
+
+	for (let iteration = 0; iteration < 200; iteration += 1) {
+		const base = rss(params);
+		const residuals = dataset.y.map((value, index) => value - base.predicted[index]!);
+		const jacobian: number[][] = [];
+
+		for (let row = 0; row < dataset.x.length; row += 1) {
+			const grads: number[] = [];
+
+			for (const name of names) {
+				const step = 1e-5;
+				const forward = { ...params, [name]: params[name]! + step };
+				const backward = { ...params, [name]: params[name]! - step };
+				const y1 = Number(compiled.evaluate({ ...forward, x: dataset.x[row]! }));
+				const y0 = Number(compiled.evaluate({ ...backward, x: dataset.x[row]! }));
+				grads.push((y1 - y0) / (2 * step));
+			}
+
+			jacobian.push(grads);
+		}
+
+		const jtJ = matrixMultiplyTransposeJ(jacobian);
+
+		for (let index = 0; index < jtJ.length; index += 1) {
+			jtJ[index]![index] = (jtJ[index]![index] ?? 0) + lambda;
+		}
+
+		const jtR = matrixVectorMultiplyTranspose(jacobian, residuals);
+		const delta = gaussianSolve(jtJ, jtR);
+		const next = { ...params };
+
+		for (let index = 0; index < names.length; index += 1) {
+			next[names[index]!] = (next[names[index]!] ?? 0) + (delta[index] ?? 0);
+		}
+
+		const trial = rss(next);
+
+		if (trial.value < base.value) {
+			params = next;
+			lambda *= 0.5;
+
+			if (Math.hypot(...delta) < 1e-10) {
+				break;
+			}
+		} else {
+			lambda *= 2;
+		}
+	}
+
+	const final = rss(params);
+	const substituted = names.reduce(
+		(source, name) => source.replaceAll(name, `(${params[name]!.toPrecision(6)})`),
+		expression
+	);
+
+	return {
+		model: 'custom',
+		equation: `y = ${substituted}`,
+		latex: `y = ${substituted}`,
+		metrics: computeMetrics(dataset.y, final.predicted),
+		coefficients: names.map((name) => params[name]!),
+		metadata: Object.fromEntries(names.map((name) => [name, params[name]!]))
+	};
+}
+
+export function fitRegression(
+	model: RegressionModel,
+	dataset: RegressionDataset,
+	options: { degree?: number; expression?: string } = {}
+): RegressionResult {
+	switch (model) {
+		case 'linear':
+			return linearRegression(dataset);
+		case 'polynomial':
+			return polynomialRegression(dataset, Math.min(6, Math.max(1, options.degree ?? 2)));
+		case 'exponential':
+			return exponentialRegression(dataset);
+		case 'logarithmic':
+			return logarithmicRegression(dataset);
+		case 'power':
+			return powerRegression(dataset);
+		case 'sinusoidal':
+			return sinusoidalRegression(dataset);
+		case 'custom':
+			return customRegression(dataset, options.expression ?? 'a*x+b');
+	}
+}

@@ -5,28 +5,11 @@
 	import { CanvasRenderer } from '$lib/renderer/canvas';
 	import type { GraphState } from '$stores/graph.svelte';
 	import type { UiState } from '$stores/ui.svelte';
-	import { formatCoordinate } from '$utils/format';
-
 	let { graph, ui } = $props<{ graph: GraphState; ui: UiState }>();
 
 	let host: HTMLDivElement | null = null;
 	let canvas: HTMLCanvasElement | null = null;
 	let renderer: CanvasRenderer | null = null;
-
-	const visibleRange = $derived.by(() => ({
-		xMin: (0 - graph.view.originX) / graph.view.scaleX,
-		xMax: (graph.viewport.width - graph.view.originX) / graph.view.scaleX,
-		yMin: (graph.view.originY - graph.viewport.height) / graph.view.scaleY,
-		yMax: graph.view.originY / graph.view.scaleY
-	}));
-
-	function syncCanvasSize(): void {
-		if (!host || !renderer) {
-			return;
-		}
-
-		renderer.resize(host.offsetWidth, host.offsetHeight);
-	}
 
 	function zoomIn(): void {
 		ui.pingInteraction();
@@ -55,15 +38,24 @@
 
 		renderer = new CanvasRenderer(canvas, graph, ui);
 		graph.attachExporter(renderer);
-		syncCanvasSize();
+		const rect = host.getBoundingClientRect();
+		renderer.resize(rect.width, rect.height);
 
 		const interactions = new InteractionManager(canvas, graph, ui, renderer);
-		const observer = new ResizeObserver(() => {
-			syncCanvasSize();
+		let resizeFrame = 0;
+		const observer = new ResizeObserver((entries) => {
+			const entry = entries[0];
+			if (!entry) return;
+			const { width, height } = entry.contentRect;
+			if (resizeFrame) cancelAnimationFrame(resizeFrame);
+			resizeFrame = requestAnimationFrame(() => {
+				renderer?.resize(width, height);
+			});
 		});
 		observer.observe(host);
 
 		return () => {
+			if (resizeFrame) cancelAnimationFrame(resizeFrame);
 			observer.disconnect();
 			interactions.destroy();
 			renderer?.destroy();
@@ -72,14 +64,11 @@
 	});
 
 	$effect(() => {
-		graph.renderVersion;
+		ui.tracePoint;
+		ui.highlightedAsymptotes;
 		renderer?.render();
 	});
 
-	$effect(() => {
-		ui.tracePoint;
-		renderer?.render();
-	});
 </script>
 
 <div class="canvas-shell" bind:this={host}>
@@ -89,12 +78,6 @@
 		tabindex="0"
 		aria-label="Interactive Plotrix graph canvas"
 	></canvas>
-
-	<div class:visible={ui.isPanningOrZooming} class="floating-panel range-panel" aria-hidden={!ui.isPanningOrZooming}>
-		<strong>Visible range</strong>
-		<p>x {formatCoordinate(visibleRange.xMin)} to {formatCoordinate(visibleRange.xMax)}</p>
-		<p>y {formatCoordinate(visibleRange.yMin)} to {formatCoordinate(visibleRange.yMax)}</p>
-	</div>
 
 	<div class="zoom-pod" aria-label="Viewport controls">
 		<button type="button" class="zoom-icon" aria-label="Zoom in" onclick={zoomIn}>
@@ -122,14 +105,6 @@
 		<button type="button" class="zoom-label" onclick={fitAll}>Fit</button>
 		<button type="button" class="zoom-label" onclick={resetView}>Reset</button>
 	</div>
-
-	{#if ui.tracePoint}
-		<div class="floating-panel trace-panel">
-			<strong>Trace</strong>
-			<p>x {formatCoordinate(ui.tracePoint.x)}</p>
-			<p>y {formatCoordinate(ui.tracePoint.y)}</p>
-		</div>
-	{/if}
 </div>
 
 <style>
@@ -162,40 +137,6 @@
 		cursor: grabbing;
 	}
 
-	.floating-panel {
-		position: absolute;
-		z-index: var(--z-overlay);
-		display: grid;
-		gap: 2px;
-		padding: var(--space-3) var(--space-4);
-		border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
-		border-radius: var(--radius-lg);
-		background: color-mix(in srgb, var(--color-bg-surface) 84%, transparent);
-		backdrop-filter: blur(10px);
-		box-shadow: var(--shadow-md);
-	}
-
-	.range-panel {
-		top: var(--space-4);
-		left: var(--space-4);
-		opacity: 0;
-		pointer-events: none;
-		transform: translateY(6px);
-		transition:
-			opacity 200ms var(--ease-default),
-			transform 200ms var(--ease-default);
-	}
-
-	.range-panel.visible {
-		opacity: 1;
-		transform: translateY(0);
-	}
-
-	.trace-panel {
-		left: var(--space-4);
-		bottom: var(--space-4);
-	}
-
 	.zoom-pod {
 		position: absolute;
 		top: var(--space-4);
@@ -219,7 +160,7 @@
 		min-width: 36px;
 		padding: 0 12px;
 		border: 0;
-		border-radius: var(--radius-md);
+		border-radius: 16px;
 		background: transparent;
 		color: var(--color-text-secondary);
 		cursor: pointer;

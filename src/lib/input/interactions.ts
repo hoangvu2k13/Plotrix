@@ -51,7 +51,7 @@ export class InteractionManager {
 		}
 	}
 
-	private getCanvasPoint(event: PointerEvent | WheelEvent) {
+	private getCanvasPoint(event: PointerEvent | WheelEvent | MouseEvent) {
 		const rect = this.canvas.getBoundingClientRect();
 		return {
 			x: event.clientX - rect.left,
@@ -96,13 +96,14 @@ export class InteractionManager {
 		this.wheelFrame = requestAnimationFrame(step);
 	};
 
-	private handleDoubleClick = (): void => {
+	private handleDoubleClick = (event: MouseEvent): void => {
 		this.ui.pingInteraction();
 
-		if (this.graph.equations.some((equation) => equation.visible && !equation.errorMessage)) {
+		if (event.shiftKey && this.graph.equations.some((equation) => equation.visible && !equation.errorMessage)) {
 			this.graph.fitAll();
 		} else {
-			this.graph.resetView();
+			const point = this.getCanvasPoint(event);
+			this.graph.zoomTo(2, point.x, point.y);
 		}
 	};
 
@@ -323,6 +324,42 @@ export class InteractionManager {
 			return;
 		}
 
+		if (modifier && event.shiftKey && lower === 'a') {
+			event.preventDefault();
+			this.ui.activeAnalysisEquationId =
+				this.ui.activeAnalysisEquationId ?? this.ui.activeEquationId ?? this.graph.equations[0]?.id ?? null;
+			return;
+		}
+
+		if (modifier && event.shiftKey && lower === 'r') {
+			event.preventDefault();
+			this.ui.openModal('regression');
+			return;
+		}
+
+		if (modifier && event.shiftKey && lower === 'd') {
+			event.preventDefault();
+			this.ui.sidebarActiveTab = 'data';
+			this.ui.sidebarOpen = true;
+			return;
+		}
+
+		if (modifier && event.shiftKey && lower === 'm') {
+			event.preventDefault();
+			this.graph.updateSettings({
+				showCriticalPoints: !this.graph.settings.showCriticalPoints
+			});
+			return;
+		}
+
+		if (modifier && event.shiftKey && lower === 'i') {
+			event.preventDefault();
+			this.graph.updateSettings({
+				showIntersections: !this.graph.settings.showIntersections
+			});
+			return;
+		}
+
 		if (modifier && lower === 'e') {
 			event.preventDefault();
 			const equation = this.graph.addEquation('');
@@ -377,6 +414,7 @@ export class InteractionManager {
 				this.ui.commandPaletteOpen = false;
 				this.ui.closeModal();
 				this.ui.activeEquationId = null;
+				this.ui.activeAnalysisEquationId = null;
 				break;
 			case 'Tab':
 				if (!this.graph.equations.length) {

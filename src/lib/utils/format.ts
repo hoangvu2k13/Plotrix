@@ -26,7 +26,7 @@ export function formatCoordinate(value: number): string {
 }
 
 export function formatDuration(ms: number): string {
-	return `${formatNumber(ms, ms < 10 ? 2 : 1)} ms`;
+	return `${ms >= 10 ? Math.round(ms) : formatNumber(ms, 2)} ms`;
 }
 
 export function formatShortcut(shortcut: string): string {

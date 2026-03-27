@@ -8,19 +8,22 @@
 		value,
 		options,
 		onChange = () => {},
-		ariaLabel = 'Select option'
+		ariaLabel = 'Select option',
+		disabled = false
 	} = $props<{
 		value: string;
 		options: SelectOption[];
 		onChange?: (value: string) => void;
 		ariaLabel?: string;
+		disabled?: boolean;
 	}>();
 </script>
 
-<label class="select-shell">
+<label class="select-shell" class:disabled>
 	<select
 		aria-label={ariaLabel}
-		value={value}
+		{value}
+		{disabled}
 		onchange={(event) => onChange((event.currentTarget as HTMLSelectElement).value)}
 	>
 		{#each options as option (option.value)}
@@ -44,18 +47,57 @@
 	.select-shell {
 		position: relative;
 		display: inline-flex;
-		min-width: 180px;
+		width: 100%;
+		min-width: 0;
+	}
+
+	.select-shell.disabled {
+		opacity: 0.55;
 	}
 
 	select {
 		width: 100%;
-		padding: 9px 38px 9px 12px;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-		background: var(--color-bg-overlay);
+		min-width: 0;
+		min-height: 42px;
+		padding: 0.75rem 2.5rem 0.75rem 0.875rem;
+		border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+		border-radius: var(--radius-lg);
+		background:
+			linear-gradient(
+				180deg,
+				color-mix(in srgb, var(--color-bg-overlay) 96%, transparent),
+				color-mix(in srgb, var(--color-bg-surface) 94%, transparent)
+			);
 		color: var(--color-text-primary);
+		font-size: var(--text-sm);
+		font-weight: var(--font-weight-medium);
 		appearance: none;
 		cursor: pointer;
+		transition:
+			border-color var(--duration-fast) var(--ease-default),
+			background-color var(--duration-fast) var(--ease-default),
+			box-shadow var(--duration-fast) var(--ease-default),
+			transform var(--duration-fast) var(--ease-default);
+	}
+
+	select:disabled {
+		cursor: not-allowed;
+	}
+
+	select:hover {
+		border-color: color-mix(in srgb, var(--color-accent) 38%, var(--color-border));
+		background:
+			linear-gradient(
+				180deg,
+				color-mix(in srgb, var(--color-bg-overlay) 92%, transparent),
+				color-mix(in srgb, var(--color-bg-surface) 90%, transparent)
+			);
+	}
+
+	select:focus {
+		outline: none;
+		border-color: color-mix(in srgb, var(--color-accent) 62%, var(--color-border));
+		box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 16%, transparent);
 	}
 
 	svg {
