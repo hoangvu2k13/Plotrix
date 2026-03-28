@@ -1,6 +1,4 @@
-import { all, create } from 'mathjs';
-
-const math = create(all!, {});
+import { evaluateCompiledWithScope, parseEquation } from '$lib/math/engine';
 
 export type RegressionModel =
 	| 'linear'
@@ -458,41 +456,28 @@ function sinusoidalRegression(dataset: RegressionDataset): RegressionResult {
 }
 
 function customRegression(dataset: RegressionDataset, expression: string): RegressionResult {
-	const parsed = math.parse(expression);
-	const symbols = new Set<string>();
+	const parsed = parseEquation(expression, 'cartesian');
 
-	parsed.traverse((node, path, parent) => {
-		if (node.type !== 'SymbolNode') {
-			return;
-		}
+	if (parsed.error || !parsed.compiledExpression) {
+		throw new Error(parsed.error ?? 'Unable to compile the custom regression expression.');
+	}
 
-		const name = String((node as unknown as { name: string }).name);
+	const names = [...parsed.freeVariables].filter((name) => name !== 'x').sort();
 
-		if (parent?.type === 'FunctionNode' && path === 'fn') {
-			return;
-		}
-
-		if (name === 'x') {
-			return;
-		}
-
+	for (const name of names) {
 		if (!SAFE_REGRESSION_PARAM.test(name) || BLOCKED_PARAM_NAMES.has(name)) {
 			throw new Error(`Unsupported parameter "${name}". Use single-letter names like a, b, c.`);
 		}
+	}
 
-		symbols.add(name);
-	});
-
-	const names = [...symbols].sort();
-	const compiled = parsed.compile();
 	const initialValues = Object.fromEntries(names.map((name, index) => [name, index === 0 ? 1 : 0]));
 	const fit = fitNonlinearLeastSquares(dataset, names, initialValues, (params, sampleX) => {
-		const output = Number(compiled.evaluate(createSafeScope(params, sampleX)));
-		return Number.isFinite(output) ? output : null;
+		return evaluateCompiledWithScope(parsed.compiledExpression, createSafeScope(params, sampleX));
 	});
 	const substituted = names.reduce(
-		(source, name) => source.replaceAll(name, `(${fit.params[name]!.toPrecision(6)})`),
-		expression
+		(source, name) =>
+			source.replaceAll(new RegExp(`\\b${name}\\b`, 'g'), `(${fit.params[name]!.toPrecision(6)})`),
+		parsed.normalized || expression
 	);
 
 	return {

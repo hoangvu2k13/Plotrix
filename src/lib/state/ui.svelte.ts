@@ -17,6 +17,7 @@ export interface TracePoint {
 	x: number;
 	y: number;
 	equationId: string;
+	detail?: string;
 }
 
 export function createUiState() {

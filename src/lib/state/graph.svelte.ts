@@ -30,7 +30,6 @@ export interface DataSeriesStyle {
 	size: number;
 	color: string;
 	showLine: boolean;
-	showErrorBars: boolean;
 }
 
 export interface DataSeriesColumn {
@@ -47,6 +46,14 @@ export interface DataSeries {
 	style: DataSeriesStyle;
 	visible: boolean;
 	plotted: boolean;
+}
+
+export interface GraphAnnotation {
+	id: string;
+	x: number;
+	y: number;
+	text: string;
+	color: string;
 }
 
 export interface PlotEquation {
@@ -93,11 +100,8 @@ export interface GraphSettings {
 	gridStyle: 'cartesian' | 'polar';
 	backgroundColor: string | null;
 	axisColor: string | null;
-	labelFont: string;
 	labelSize: number;
-	snapToGrid: boolean;
 	traceMode: boolean;
-	animationSpeed: number;
 	showCriticalPoints: boolean;
 	showIntersections: boolean;
 }
@@ -122,6 +126,7 @@ interface GraphSnapshot {
 	variables: Variable[];
 	dataSeries: DataSeries[];
 	regressionResults: RegressionResult[];
+	annotations?: GraphAnnotation[];
 }
 
 export interface GraphExporter {
@@ -153,11 +158,8 @@ const DEFAULT_SETTINGS: GraphSettings = {
 	gridStyle: 'cartesian',
 	backgroundColor: null,
 	axisColor: null,
-	labelFont: 'Inter Variable',
 	labelSize: 12,
-	snapToGrid: false,
 	traceMode: true,
-	animationSpeed: 1,
 	showCriticalPoints: true,
 	showIntersections: true
 };
@@ -183,8 +185,10 @@ const MAX_DATA_ROWS = 1200;
 const MAX_CELL_CHARS = 32;
 const MAX_IMPORT_CELLS = MAX_DATA_SERIES * MAX_DATA_COLUMNS * MAX_DATA_ROWS;
 const MAX_REGRESSION_RESULTS = 24;
-const MAX_HISTORY_ENTRIES = 50;
+const MAX_HISTORY_ENTRIES = 20;
+const MAX_HISTORY_BYTES = 10 * 1024 * 1024;
 const MAX_ANALYSIS_CACHE_ENTRIES = 200;
+const MAX_ANNOTATIONS = 48;
 
 function base64UrlEncode(value: string): string {
 	const bytes = new TextEncoder().encode(value);
@@ -285,14 +289,7 @@ function validateSettings(input: unknown): GraphSettings {
 			520
 		),
 		labelSize: asFiniteNumber(value.labelSize, DEFAULT_SETTINGS.labelSize, 10, 18),
-		snapToGrid: Boolean(value.snapToGrid ?? DEFAULT_SETTINGS.snapToGrid),
 		traceMode: Boolean(value.traceMode ?? DEFAULT_SETTINGS.traceMode),
-		animationSpeed: asFiniteNumber(
-			value.animationSpeed,
-			DEFAULT_SETTINGS.animationSpeed,
-			0.25,
-			2.5
-		),
 		showCriticalPoints: Boolean(value.showCriticalPoints ?? DEFAULT_SETTINGS.showCriticalPoints),
 		showIntersections: Boolean(value.showIntersections ?? DEFAULT_SETTINGS.showIntersections)
 	};
@@ -402,13 +399,48 @@ function validateDataSeries(input: unknown): DataSeries[] {
 				symbol: value.style?.symbol ?? base.style.symbol,
 				size: asFiniteNumber(value.style?.size, base.style.size, 4, 12),
 				color: typeof value.style?.color === 'string' ? value.style.color : base.style.color,
-				showLine: Boolean(value.style?.showLine ?? base.style.showLine),
-				showErrorBars: Boolean(value.style?.showErrorBars ?? base.style.showErrorBars)
+				showLine: Boolean(value.style?.showLine ?? base.style.showLine)
 			},
 			visible: Boolean(value.visible ?? base.visible),
 			plotted: Boolean(value.plotted ?? base.plotted)
 		};
 	});
+}
+
+function validateAnnotations(input: unknown): GraphAnnotation[] {
+	if (!Array.isArray(input)) {
+		return [];
+	}
+
+	return input
+		.slice(0, MAX_ANNOTATIONS)
+		.map((entry) => {
+			if (!entry || typeof entry !== 'object') {
+				return null;
+			}
+
+			const annotation = entry as Partial<GraphAnnotation>;
+
+			if (
+				typeof annotation.text !== 'string' ||
+				typeof annotation.color !== 'string' ||
+				typeof annotation.x !== 'number' ||
+				typeof annotation.y !== 'number' ||
+				!Number.isFinite(annotation.x) ||
+				!Number.isFinite(annotation.y)
+			) {
+				return null;
+			}
+
+			return {
+				id: typeof annotation.id === 'string' ? annotation.id : nanoid(),
+				x: clamp(annotation.x, -1e7, 1e7),
+				y: clamp(annotation.y, -1e7, 1e7),
+				text: annotation.text.slice(0, 120),
+				color: annotation.color
+			};
+		})
+		.filter((entry): entry is GraphAnnotation => entry !== null);
 }
 
 function createDefaultVariable(name: string, current?: Partial<Variable>): Variable {
@@ -434,8 +466,7 @@ function defaultDataSeries(index: number): DataSeries {
 			symbol: 'circle',
 			size: 6,
 			color: COLOR_PALETTE[index % COLOR_PALETTE.length]!,
-			showLine: false,
-			showErrorBars: false
+			showLine: false
 		},
 		visible: true,
 		plotted: false
@@ -494,6 +525,7 @@ function createSnapshot(graph: {
 	variables: Variable[];
 	dataSeries: DataSeries[];
 	regressionResults: RegressionResult[];
+	annotations: GraphAnnotation[];
 }): GraphSnapshot {
 	return {
 		version: 2,
@@ -536,7 +568,8 @@ function createSnapshot(graph: {
 			}
 
 			return next;
-		})
+		}),
+		annotations: graph.annotations.map((annotation) => ({ ...annotation }))
 	};
 }
 
@@ -577,7 +610,8 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 			settings: validateSettings(snapshot.settings),
 			variables: validateVariables(snapshot.variables),
 			dataSeries: validateDataSeries(snapshot.dataSeries),
-			regressionResults: clampRegressionResults(snapshot.regressionResults)
+			regressionResults: clampRegressionResults(snapshot.regressionResults),
+			annotations: validateAnnotations(snapshot.annotations)
 		};
 	}
 
@@ -620,7 +654,8 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 			}),
 			variables: [],
 			dataSeries: validateDataSeries([]),
-			regressionResults: []
+			regressionResults: [],
+			annotations: []
 		};
 	}
 
@@ -635,21 +670,30 @@ export function createGraphState() {
 		viewport: { width: 0, height: 0 },
 		variables: [] as Variable[],
 		dataSeries: [defaultDataSeries(0)] as DataSeries[],
+		annotations: [] as GraphAnnotation[],
 		analysisCache: new LruMap<string, EquationAnalysis>(MAX_ANALYSIS_CACHE_ENTRIES),
 		regressionResults: [] as RegressionResult[],
+		variablesHash: '',
 		historyIndex: 0,
 		historySize: 0
 	});
 
 	let exporter: GraphExporter | null = null;
 	let history: GraphSnapshot[] = [];
+	let historyByteSizes: number[] = [];
+	let historyBytes = 0;
 	let lastHistoryJson = '';
 	let pendingHistoryTimer: ReturnType<typeof setTimeout> | null = null;
+	let pendingAnalysisInvalidationTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastHistoryMeta: { kind: string; target: string; at: number } | null = null;
 	const criticalPointCache = new LruMap<string, CriticalPoint[]>(MAX_ANALYSIS_CACHE_ENTRIES);
 	const intersectionCache = new LruMap<string, IntersectionPoint[]>(MAX_ANALYSIS_CACHE_ENTRIES);
+	// These caches are intentionally non-reactive worker bookkeeping.
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const pendingAnalysisRequests = new Set<string>();
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const pendingIntersectionRequests = new Set<string>();
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const pendingFitRequests = new Map<
 		string,
 		{
@@ -657,22 +701,53 @@ export function createGraphState() {
 			dataBounds: { minX: number; maxX: number; minY: number; maxY: number } | null;
 		}
 	>();
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const analysisFailures = new Set<string>();
 	let analysisWorker: Worker | null = null;
 	let memoizedVariableScope: Record<string, number> = {};
 	let lastVariableSnapshot = [] as Array<{ name: string; value: number }>;
+
+	function rememberAnalysisFailure(key: string): void {
+		analysisFailures.delete(key);
+		analysisFailures.add(key);
+
+		while (analysisFailures.size > MAX_ANALYSIS_CACHE_ENTRIES) {
+			const oldest = analysisFailures.values().next().value;
+
+			if (!oldest) {
+				break;
+			}
+
+			analysisFailures.delete(oldest);
+		}
+	}
+
+	function resetAnalysisWorker(): void {
+		pendingAnalysisRequests.clear();
+		pendingIntersectionRequests.clear();
+		pendingFitRequests.clear();
+		analysisWorker?.terminate();
+		analysisWorker = null;
+		requestRender();
+	}
 
 	function ensureAnalysisWorker(): Worker | null {
 		if (analysisWorker || typeof window === 'undefined' || typeof Worker === 'undefined') {
 			return analysisWorker;
 		}
 
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		analysisWorker = new Worker(new URL('../workers/analysis.worker.ts', import.meta.url), {
 			type: 'module'
 		});
 
 		analysisWorker.onmessage = (event: MessageEvent) => {
-			const data = event.data as { type?: string; key?: string; result?: unknown };
+			const data = event.data as {
+				type?: string;
+				key?: string;
+				result?: unknown;
+				partial?: boolean;
+			};
 
 			if (!data || typeof data.type !== 'string' || typeof data.key !== 'string') {
 				return;
@@ -699,13 +774,16 @@ export function createGraphState() {
 			}
 
 			if (data.type === 'equationAnalysis') {
-				pendingAnalysisRequests.delete(data.key);
 				if (data.result) {
 					analysisFailures.delete(data.key);
 					graph.analysisCache.set(data.key, data.result as EquationAnalysis);
 					exporter?.requestRender?.();
+					if (!data.partial) {
+						pendingAnalysisRequests.delete(data.key);
+					}
 				} else {
-					analysisFailures.add(data.key);
+					pendingAnalysisRequests.delete(data.key);
+					rememberAnalysisFailure(data.key);
 				}
 				return;
 			}
@@ -743,6 +821,10 @@ export function createGraphState() {
 			}
 		};
 
+		analysisWorker.onerror = () => {
+			resetAnalysisWorker();
+		};
+
 		return analysisWorker;
 	}
 
@@ -767,6 +849,9 @@ export function createGraphState() {
 			memoizedVariableScope = Object.fromEntries(
 				nextSnapshot.map((variable) => [variable.name, variable.value])
 			);
+			graph.variablesHash = nextSnapshot
+				.map((variable) => `${variable.name}:${variable.value}`)
+				.join('|');
 		}
 
 		return memoizedVariableScope;
@@ -806,27 +891,11 @@ export function createGraphState() {
 		bumpRenderVersion(false);
 	}
 
-	function viewportHash(): string {
-		return [
-			graph.view.originX.toFixed(3),
-			graph.view.originY.toFixed(3),
-			graph.view.scaleX.toFixed(6),
-			graph.view.scaleY.toFixed(6),
-			graph.viewport.width,
-			graph.viewport.height
-		].join(':');
-	}
-
 	function analysisViewportBucket() {
 		const width = Math.max(1, graph.viewport.width);
-		const height = Math.max(1, graph.viewport.height);
 		const xMin = (0 - graph.view.originX) / graph.view.scaleX;
 		const xMax = (width - graph.view.originX) / graph.view.scaleX;
-		const yMin = (graph.view.originY - height) / graph.view.scaleY;
-		const yMax = graph.view.originY / graph.view.scaleY;
 		const xSpan = Math.max(1e-6, xMax - xMin);
-		const ySpan = Math.max(1e-6, yMax - yMin);
-
 		return [
 			Math.round((xMin / xSpan) * 5) / 5,
 			Math.round((xMax / xSpan) * 5) / 5,
@@ -841,6 +910,13 @@ export function createGraphState() {
 		pendingAnalysisRequests.clear();
 		pendingIntersectionRequests.clear();
 		analysisFailures.clear();
+	}
+
+	function clearPendingAnalysisInvalidation(): void {
+		if (pendingAnalysisInvalidationTimer) {
+			clearTimeout(pendingAnalysisInvalidationTimer);
+			pendingAnalysisInvalidationTimer = null;
+		}
 	}
 
 	function clearEquationAnalysisCache(raw?: string): void {
@@ -867,7 +943,18 @@ export function createGraphState() {
 		exporter?.requestRender?.();
 	}
 
+	function scheduleAnalysisInvalidation(delay = 100): void {
+		clearPendingAnalysisInvalidation();
+		pendingAnalysisInvalidationTimer = setTimeout(() => {
+			clearAnalysisCaches();
+			clearEquationAnalysisCache();
+			pendingAnalysisInvalidationTimer = null;
+			requestRender();
+		}, delay);
+	}
+
 	function syncVariables(): void {
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const names = new Set<string>();
 
 		for (const equation of graph.equations) {
@@ -876,9 +963,12 @@ export function createGraphState() {
 			}
 		}
 
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const current = new Map(graph.variables.map((variable) => [variable.name, variable]));
 		const next = [...names].sort().map((name) => createDefaultVariable(name, current.get(name)));
 		graph.variables.splice(0, graph.variables.length, ...next);
+		lastVariableSnapshot = [];
+		variableScope();
 	}
 
 	function bumpRenderVersion(invalidateAnalysis = false): void {
@@ -905,18 +995,27 @@ export function createGraphState() {
 		clearPendingHistory();
 		const snapshot = createSnapshot(graph);
 		const serialized = JSON.stringify(snapshot);
+		const byteSize = serialized.length * 2;
 
 		if (serialized === lastHistoryJson) {
 			return;
 		}
 
 		if (replaceCurrent && history.length > 0) {
+			historyBytes -= historyByteSizes[graph.historyIndex] ?? 0;
 			history[graph.historyIndex] = snapshot;
+			historyByteSizes[graph.historyIndex] = byteSize;
+			historyBytes += byteSize;
 		} else {
 			history = history.slice(0, graph.historyIndex + 1);
+			historyByteSizes = historyByteSizes.slice(0, graph.historyIndex + 1);
+			historyBytes = historyByteSizes.reduce((sum, value) => sum + value, 0);
 			history.push(snapshot);
+			historyByteSizes.push(byteSize);
+			historyBytes += byteSize;
 
-			if (history.length > MAX_HISTORY_ENTRIES) {
+			while (history.length > MAX_HISTORY_ENTRIES || historyBytes > MAX_HISTORY_BYTES) {
+				historyBytes -= historyByteSizes.shift() ?? 0;
 				history.shift();
 			}
 
@@ -941,14 +1040,22 @@ export function createGraphState() {
 		}, delay);
 	}
 
-	function restoreSnapshot(snapshot: GraphSnapshot): void {
-		const restoredEquations = snapshot.equations.map((equation, index) =>
-			createEquation(
-				equation.raw,
-				equation.color || nextColor(index),
-				equation as Partial<PlotEquation>
-			)
-		);
+	async function restoreSnapshot(snapshot: GraphSnapshot): Promise<void> {
+		const restoredEquations: PlotEquation[] = [];
+
+		for (const [index, equation] of snapshot.equations.entries()) {
+			restoredEquations.push(
+				createEquation(
+					equation.raw,
+					equation.color || nextColor(index),
+					equation as Partial<PlotEquation>
+				)
+			);
+
+			if (snapshot.equations.length > 10 && (index + 1) % 5 === 0) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 0));
+			}
+		}
 
 		graph.equations.splice(0, graph.equations.length, ...restoredEquations);
 		graph.variables.splice(
@@ -976,6 +1083,7 @@ export function createGraphState() {
 			graph.regressionResults.length,
 			...(snapshot.regressionResults ?? [])
 		);
+		graph.annotations.splice(0, graph.annotations.length, ...(snapshot.annotations ?? []));
 		clearEquationAnalysisCache();
 		Object.assign(graph.view, snapshot.view, { isPanning: false, isAnimating: false });
 		Object.assign(graph.settings, { ...DEFAULT_SETTINGS, ...snapshot.settings });
@@ -1160,6 +1268,37 @@ export function createGraphState() {
 		queueHistory('view', 'zoom', 120);
 	}
 
+	function setViewBounds(
+		xMin: number,
+		xMax: number,
+		yMin: number,
+		yMax: number,
+		recordHistory = true
+	): void {
+		if (
+			!Number.isFinite(xMin) ||
+			!Number.isFinite(xMax) ||
+			!Number.isFinite(yMin) ||
+			!Number.isFinite(yMax) ||
+			xMin === xMax ||
+			yMin === yMax
+		) {
+			return;
+		}
+
+		const width = Math.max(1, graph.viewport.width);
+		const height = Math.max(1, graph.viewport.height);
+		graph.view.scaleX = clamp(width / Math.abs(xMax - xMin), MIN_ZOOM, MAX_ZOOM);
+		graph.view.scaleY = clamp(height / Math.abs(yMax - yMin), MIN_ZOOM, MAX_ZOOM);
+		graph.view.originX = -Math.min(xMin, xMax) * graph.view.scaleX;
+		graph.view.originY = Math.max(yMin, yMax) * graph.view.scaleY;
+		bumpRenderVersion(false);
+
+		if (recordHistory) {
+			queueHistory('view', 'bounds', 120);
+		}
+	}
+
 	function panBy(dx: number, dy: number): void {
 		graph.view.originX += dx;
 		graph.view.originY += dy;
@@ -1167,9 +1306,22 @@ export function createGraphState() {
 		queueHistory('view', 'pan', 120);
 	}
 
-	function panTo(x: number, y: number): void {
-		graph.view.originX = graph.viewport.width / 2 - x * graph.view.scaleX;
-		graph.view.originY = graph.viewport.height / 2 + y * graph.view.scaleY;
+	function panTo(
+		x: number,
+		y: number,
+		insets: { left?: number; right?: number; top?: number; bottom?: number } = {}
+	): void {
+		const width = graph.viewport.width;
+		const height = graph.viewport.height;
+		const leftInset = insets.left ?? 0;
+		const rightInset = insets.right ?? 0;
+		const topInset = insets.top ?? 0;
+		const bottomInset = insets.bottom ?? 0;
+		const visibleWidth = Math.max(1, width - leftInset - rightInset);
+		const visibleHeight = Math.max(1, height - topInset - bottomInset);
+
+		graph.view.originX = leftInset + visibleWidth / 2 - x * graph.view.scaleX;
+		graph.view.originY = topInset + visibleHeight / 2 + y * graph.view.scaleY;
 		bumpRenderVersion(false);
 		queueHistory('view', 'pan-to', 120);
 	}
@@ -1184,10 +1336,8 @@ export function createGraphState() {
 			return;
 		}
 		const scope = variableScope();
-		const fitKey = `fit:${visibleEquations.map((equation) => equation.id).join(',')}:${Object.values(scope).join(':')}:${graph.viewport.width}:${graph.viewport.height}`;
+		const fitKey = `fit:${visibleEquations.map((equation) => equation.id).join(',')}:${graph.variablesHash}:${graph.viewport.width}:${graph.viewport.height}`;
 		const worker = ensureAnalysisWorker();
-
-		let dataBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
 
 		if (worker && !pendingFitRequests.has(fitKey)) {
 			pendingFitRequests.set(fitKey, {
@@ -1249,7 +1399,7 @@ export function createGraphState() {
 			return;
 		}
 
-		dataBounds = { minX, maxX, minY, maxY };
+		const dataBounds = { minX, maxX, minY, maxY };
 
 		if (worker) {
 			pendingFitRequests.set(fitKey, {
@@ -1270,7 +1420,6 @@ export function createGraphState() {
 		Object.assign(graph.settings, patch);
 		graph.settings.equationPanelWidth = clamp(graph.settings.equationPanelWidth, 300, 520);
 		graph.settings.labelSize = clamp(graph.settings.labelSize, 10, 18);
-		graph.settings.animationSpeed = clamp(graph.settings.animationSpeed, 0.25, 2.5);
 		bumpRenderVersion(false);
 		queueHistory('settings', 'settings', 180);
 	}
@@ -1288,7 +1437,8 @@ export function createGraphState() {
 		variable.step = Math.max(1e-6, Math.abs(variable.step));
 		variable.value = clamp(variable.value, variable.min, variable.max);
 		lastVariableSnapshot = [];
-		bumpRenderVersion(true);
+		requestRender();
+		scheduleAnalysisInvalidation();
 		queueHistory('variables', name, 120);
 	}
 
@@ -1315,7 +1465,9 @@ export function createGraphState() {
 			rows: patch.rows ?? current.rows,
 			style: patch.style ? { ...current.style, ...patch.style } : current.style
 		});
-		bumpRenderVersion(false);
+		if (current.plotted || patch.plotted) {
+			bumpRenderVersion(false);
+		}
 		queueHistory('data-series', id, 150);
 	}
 
@@ -1347,6 +1499,36 @@ export function createGraphState() {
 		queueHistory('regression', 'clear', 120);
 	}
 
+	function addAnnotation(
+		x: number,
+		y: number,
+		text: string,
+		color = nextColor()
+	): GraphAnnotation | null {
+		if (
+			!Number.isFinite(x) ||
+			!Number.isFinite(y) ||
+			typeof text !== 'string' ||
+			!text.trim().length
+		) {
+			return null;
+		}
+
+		const annotation: GraphAnnotation = {
+			id: nanoid(),
+			x,
+			y,
+			text: text.trim().slice(0, 120),
+			color
+		};
+
+		graph.annotations.unshift(annotation);
+		graph.annotations.splice(MAX_ANNOTATIONS);
+		bumpRenderVersion(false);
+		commitHistory('annotations', annotation.id);
+		return annotation;
+	}
+
 	function setEquationRenderTime(id: string, renderTimeMs: number): void {
 		const equation = graph.equations.find((entry) => entry.id === id);
 
@@ -1371,7 +1553,7 @@ export function createGraphState() {
 		}
 
 		const scope = variableScope();
-		const key = `${equation.id}:${analysisViewportBucket()}:${Object.values(scope).join(':')}`;
+		const key = `${equation.id}:${analysisViewportBucket()}:${graph.variablesHash}`;
 		const cached = criticalPointCache.get(key);
 
 		if (cached) {
@@ -1421,7 +1603,7 @@ export function createGraphState() {
 			const xMax = (width - graph.view.originX) / graph.view.scaleX;
 			return `${Math.round(xMin * 2) / 2}:${Math.round(xMax * 2) / 2}`;
 		})();
-		const key = `${visibleEquations.map((equation) => equation.id).join(',')}:${range}:${Math.round(graph.view.scaleX * 10) / 10}:${Object.values(scope).join(':')}`;
+		const key = `${visibleEquations.map((equation) => equation.id).join(',')}:${range}:${Math.round(graph.view.scaleX * 10) / 10}:${graph.variablesHash}`;
 		const cached = intersectionCache.get(key);
 
 		if (cached) {
@@ -1464,7 +1646,7 @@ export function createGraphState() {
 		}
 
 		const scope = variableScope();
-		const cacheKey = `${equation.kind}:${equation.raw}:${analysisViewportBucket()}:${Object.values(scope).join(':')}`;
+		const cacheKey = `${equation.kind}:${equation.raw}:${analysisViewportBucket()}:${graph.variablesHash}`;
 		const cached = graph.analysisCache.get(cacheKey);
 
 		if (cached) {
@@ -1501,8 +1683,7 @@ export function createGraphState() {
 			return true;
 		}
 
-		const scope = variableScope();
-		const cacheKey = `${equation.kind}:${equation.raw}:${analysisViewportBucket()}:${Object.values(scope).join(':')}`;
+		const cacheKey = `${equation.kind}:${equation.raw}:${analysisViewportBucket()}:${graph.variablesHash}`;
 		return analysisFailures.has(cacheKey);
 	}
 
@@ -1518,7 +1699,7 @@ export function createGraphState() {
 		return JSON.stringify(createSnapshot(graph), null, 2);
 	}
 
-	function importJSON(json: string): void {
+	async function importJSON(json: string): Promise<void> {
 		if (json.length > MAX_URL_SNAPSHOT_BYTES * 8) {
 			throw new Error('Imported Plotrix snapshot exceeds the supported size limit.');
 		}
@@ -1527,12 +1708,14 @@ export function createGraphState() {
 		try {
 			snapshot = deserializeSnapshot(json);
 		} catch (error) {
-			throw new Error(error instanceof Error ? error.message : 'Unable to import Plotrix state.');
+			throw new Error(error instanceof Error ? error.message : 'Unable to import Plotrix state.', {
+				cause: error
+			});
 		}
 		if (!snapshot.equations.length && !snapshot.dataSeries.length) {
 			throw new Error('Imported Plotrix state is empty or invalid.');
 		}
-		restoreSnapshot(snapshot);
+		await restoreSnapshot(snapshot);
 		commitHistory('import', 'snapshot');
 	}
 
@@ -1542,17 +1725,17 @@ export function createGraphState() {
 		}
 
 		const encoded = base64UrlEncode(exportJSON());
+		const url = `${window.location.origin}${window.location.pathname}#plotrix=${encoded}`;
 
-		if (encoded.length > MAX_URL_SNAPSHOT_BYTES * 2) {
+		if (encoded.length > MAX_URL_SNAPSHOT_BYTES * 2 || url.length > MAX_URL_SNAPSHOT_BYTES * 2) {
 			throw new Error('Plotrix snapshot is too large to share as a URL. Export JSON instead.');
 		}
 
-		const url = `${window.location.origin}${window.location.pathname}#plotrix=${encoded}`;
 		window.history.replaceState(null, '', `#plotrix=${encoded}`);
 		return url;
 	}
 
-	function undoHistory(): void {
+	async function undoHistory(): Promise<void> {
 		clearPendingHistory();
 
 		if (graph.historyIndex <= 0) {
@@ -1560,10 +1743,10 @@ export function createGraphState() {
 		}
 
 		graph.historyIndex -= 1;
-		restoreSnapshot(history[graph.historyIndex]!);
+		await restoreSnapshot(history[graph.historyIndex]!);
 	}
 
-	function redoHistory(): void {
+	async function redoHistory(): Promise<void> {
 		clearPendingHistory();
 
 		if (graph.historyIndex >= history.length - 1) {
@@ -1571,7 +1754,7 @@ export function createGraphState() {
 		}
 
 		graph.historyIndex += 1;
-		restoreSnapshot(history[graph.historyIndex]!);
+		await restoreSnapshot(history[graph.historyIndex]!);
 	}
 
 	function attachExporter(next: GraphExporter | null): void {
@@ -1580,6 +1763,7 @@ export function createGraphState() {
 
 	function destroy(): void {
 		clearPendingHistory();
+		clearPendingAnalysisInvalidation();
 		pendingAnalysisRequests.clear();
 		pendingIntersectionRequests.clear();
 		pendingFitRequests.clear();
@@ -1616,6 +1800,7 @@ export function createGraphState() {
 		setViewportSize,
 		resetView,
 		zoomTo,
+		setViewBounds,
 		panBy,
 		panTo,
 		fitAll,
@@ -1626,6 +1811,7 @@ export function createGraphState() {
 		removeDataSeries,
 		upsertRegressionResult,
 		clearRegressionResults,
+		addAnnotation,
 		setEquationRenderTime,
 		getCriticalPoints,
 		getIntersections,

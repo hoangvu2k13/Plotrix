@@ -1,11 +1,12 @@
 <script lang="ts">
-	import katex from 'katex';
 	import { onDestroy } from 'svelte';
 
 	import ExpressionEditor from '$components/ExpressionEditor.svelte';
 	import type { RegressionModel, RegressionResult } from '$lib/analysis/regression';
 	import type { GraphState } from '$stores/graph.svelte';
 	import type { UiState } from '$stores/ui.svelte';
+	import { getCachedKatex } from '$utils/katex-cache';
+	import { renderKatex } from '$utils/katexRenderer';
 
 	let { graph, ui } = $props<{ graph: GraphState; ui: UiState }>();
 
@@ -13,6 +14,8 @@
 	let degree = $state(2);
 	let customExpression = $state('a * sin(b*x + c) + d');
 	let currentResult = $state<RegressionResult | null>(null);
+	let equationHtml = $state('');
+	let equationRenderToken = 0;
 	let pending = $state(false);
 	let regressionWorker: Worker | null = null;
 
@@ -75,13 +78,24 @@
 	const comparison = $derived(
 		[...graph.regressionResults].sort((left, right) => right.metrics.r2 - left.metrics.r2)
 	);
-	const equationHtml = $derived.by(() => {
-		if (!currentResult) return '';
-		try {
-			return katex.renderToString(currentResult.latex, { throwOnError: false, displayMode: true });
-		} catch {
-			return currentResult.equation;
+
+	$effect(() => {
+		if (!currentResult) {
+			equationHtml = '';
+			return;
 		}
+
+		const cacheKey = `regression:${currentResult.model}:${currentResult.latex}`;
+		const cached = getCachedKatex(cacheKey);
+		const token = ++equationRenderToken;
+
+		equationHtml = cached ?? currentResult.equation;
+
+		void renderKatex(cacheKey, currentResult.latex, true, currentResult.equation).then((html) => {
+			if (token === equationRenderToken) {
+				equationHtml = html;
+			}
+		});
 	});
 
 	function fit(): void {
@@ -123,7 +137,7 @@
 
 <div class="panel">
 	<div class="models" role="tablist" aria-label="Regression model">
-		{#each [['linear', 'Linear'], ['polynomial', 'Poly'], ['exponential', 'Exp'], ['logarithmic', 'Log'], ['power', 'Power'], ['sinusoidal', 'Sine'], ['custom', 'Custom']] as [value, label]}
+		{#each [['linear', 'Linear'], ['polynomial', 'Poly'], ['exponential', 'Exp'], ['logarithmic', 'Log'], ['power', 'Power'], ['sinusoidal', 'Sine'], ['custom', 'Custom']] as [value, label] (value)}
 			<button
 				type="button"
 				role="tab"
@@ -160,8 +174,13 @@
 		Fit
 	</button>
 
+	{#if !dataset}
+		<p class="hint">Plot or enter at least two numeric data points to enable regression.</p>
+	{/if}
+
 	{#if currentResult}
 		<section class="results">
+			<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 			<div class="equation">{@html equationHtml}</div>
 			<div class={`badge ${badgeTone(currentResult.metrics.r2)}`}>
 				R² {currentResult.metrics.r2.toPrecision(4)}
@@ -173,6 +192,11 @@
 	{/if}
 
 	{#if comparison.length}
+		<div class="history-header">
+			<button type="button" class="clear-history" onclick={() => graph.clearRegressionResults()}>
+				Clear history
+			</button>
+		</div>
 		<table class="comparison">
 			<thead>
 				<tr>
@@ -181,7 +205,7 @@
 				</tr>
 			</thead>
 			<tbody>
-				{#each comparison as result}
+				{#each comparison as result (`${result.model}:${result.equation}`)}
 					<tr>
 						<td>{result.model}</td>
 						<td>{result.metrics.r2.toPrecision(4)}</td>
@@ -199,10 +223,28 @@
 		gap: var(--space-4);
 	}
 
+	.hint {
+		margin-top: calc(-1 * var(--space-2));
+		color: var(--color-text-secondary);
+		font-size: var(--text-sm);
+	}
+
 	.models {
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--space-2);
+	}
+
+	.history-header {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.clear-history {
+		color: var(--color-text-muted);
+		font-size: var(--text-xs);
+		text-decoration: underline;
+		text-underline-offset: 2px;
 	}
 
 	.models button,

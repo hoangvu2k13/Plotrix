@@ -1,9 +1,13 @@
 /// <reference lib="webworker" />
 
 import { analyzeCriticalPoints } from '$lib/analysis/criticalPoints';
-import { analyzeEquation } from '$lib/analysis/equationAnalysis';
+import {
+	analyzeEquation,
+	createPartialEquationAnalysis
+} from '$lib/analysis/equationAnalysis';
 import { findIntersections } from '$lib/analysis/intersections';
 import type { IntersectionEquation } from '$lib/analysis/intersections';
+import { LruMap } from '$lib/utils/lru';
 import {
 	evaluateCartesianAt,
 	evaluateParametric,
@@ -71,6 +75,8 @@ type AnalysisRequest =
 	| EquationAnalysisRequest
 	| FitBoundsRequest;
 
+const parseCache = new LruMap<string, ReturnType<typeof parseEquation>>(50);
+
 function isViewport(value: unknown): value is WorkerViewport {
 	if (!value || typeof value !== 'object') return false;
 	const entry = value as Record<string, unknown>;
@@ -131,12 +137,25 @@ function isAnalysisRequest(value: unknown): value is AnalysisRequest {
 }
 
 function evaluateCartesian(raw: string, kind: EquationKind, variables: Record<string, number>) {
-	const parsed = parseEquation(raw, kind);
+	const parsed = getParsedEquation(raw, kind);
 	return {
 		parsed,
 		evaluate: (x: number) =>
 			evaluateCartesianAt(parsed.compiledExpression ?? parsed.node, x, variables)
 	};
+}
+
+function getParsedEquation(raw: string, kind: EquationKind) {
+	const cacheKey = `${kind}:${raw}`;
+	const cached = parseCache.get(cacheKey);
+
+	if (cached) {
+		return cached;
+	}
+
+	const parsed = parseEquation(raw, kind);
+	parseCache.set(cacheKey, parsed);
+	return parsed;
 }
 
 self.onmessage = (event: MessageEvent<unknown>) => {
@@ -157,14 +176,14 @@ self.onmessage = (event: MessageEvent<unknown>) => {
 						request.canvasWidth
 					)
 				: [];
-		self.postMessage({ type: request.type, key: request.key, result });
-		return;
-	}
+	self.postMessage({ type: request.type, key: request.key, result });
+	return;
+}
 
 	if (request.type === 'intersections') {
 		const equations: IntersectionEquation[] = [];
 		for (const equation of request.equations) {
-			const parsed = parseEquation(equation.raw, equation.kind);
+			const parsed = getParsedEquation(equation.raw, equation.kind);
 			if (equation.kind === 'cartesian') {
 				equations.push({
 					id: equation.id,
@@ -203,7 +222,7 @@ self.onmessage = (event: MessageEvent<unknown>) => {
 		);
 
 		for (const equation of request.equations) {
-			const parsed = parseEquation(equation.raw, equation.kind);
+			const parsed = getParsedEquation(equation.raw, equation.kind);
 			const segments = sampleEquation(
 				{
 					compiled: parsed.node,
@@ -248,16 +267,32 @@ self.onmessage = (event: MessageEvent<unknown>) => {
 	}
 
 	const { parsed, evaluate } = evaluateCartesian(request.raw, request.kind, request.variables);
-	const result =
-		parsed.node && request.kind === 'cartesian'
-			? analyzeEquation({
-					raw: request.raw,
-					node: parsed.node,
-					evaluate,
-					viewport: request.viewport
-				})
-			: null;
-	self.postMessage({ type: request.type, key: request.key, result });
+	if (!parsed.node || request.kind !== 'cartesian') {
+		self.postMessage({ type: request.type, key: request.key, result: null });
+		return;
+	}
+
+	const criticalPoints = analyzeCriticalPoints(
+		(x) => evaluate(x) ?? Number.NaN,
+		request.viewport,
+		request.viewport.width
+	);
+	self.postMessage({
+		type: request.type,
+		key: request.key,
+		partial: true,
+		result: createPartialEquationAnalysis(request.viewport, criticalPoints)
+	});
+	self.postMessage({
+		type: request.type,
+		key: request.key,
+		result: analyzeEquation({
+			raw: request.raw,
+			node: parsed.node,
+			evaluate,
+			viewport: request.viewport
+		})
+	});
 };
 
 export {};

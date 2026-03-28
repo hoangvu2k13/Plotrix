@@ -44,7 +44,17 @@
 		transition:
 			opacity var(--duration-fast) var(--ease-default),
 			background-color var(--duration-fast) var(--ease-default),
-			border-color var(--duration-fast) var(--ease-default);
+			border-color var(--duration-fast) var(--ease-default),
+			box-shadow var(--duration-fast) var(--ease-default),
+			transform var(--duration-fast) var(--ease-default);
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.toggle:hover:not(.disabled) {
+			border-color: color-mix(in srgb, var(--color-accent) 42%, var(--color-border));
+			box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 14%, transparent);
+			transform: translateY(-1px);
+		}
 	}
 
 	.toggle.checked {

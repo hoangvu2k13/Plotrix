@@ -2,11 +2,13 @@
 	import { browser } from '$app/environment';
 	import {
 		Aperture,
+		CircleHelp,
 		ChevronDown,
 		CircleDot,
 		CircleGauge,
 		Crosshair,
 		Download,
+		FunctionSquare,
 		Grid2x2,
 		Grid3x3,
 		Lock,
@@ -18,9 +20,9 @@
 		Radar,
 		Redo2,
 		ScanEye,
+		Search,
 		Settings2,
 		Share2,
-		Sigma,
 		SunMoon,
 		Terminal,
 		Undo2,
@@ -42,6 +44,7 @@
 	import ToastViewport from '$components/ToastViewport.svelte';
 	import Toggle from '$components/Toggle.svelte';
 	import VariableSliderPanel from '$components/VariableSliderPanel.svelte';
+	import { parseEquation } from '$lib/math/engine';
 	import { createGraphState } from '$stores/graph.svelte';
 	import { createUiState } from '$stores/ui.svelte';
 	import { copyText, saveBlob, saveText } from '$utils/download';
@@ -70,10 +73,10 @@
 	} as const;
 
 	const shortcuts = [
+		['Close any panel / modal', 'Escape'],
 		['Pan', 'Drag or use arrow keys'],
 		['Zoom', 'Mouse wheel, pinch, +, -'],
 		['Reset view', '0'],
-		['Fit all', 'F'],
 		['New equation', formatShortcut('Mod+E')],
 		['Undo / redo', `${formatShortcut('Mod+Z')} / ${formatShortcut('Mod+Shift+Z')}`],
 		['Command palette', formatShortcut('Mod+K')],
@@ -86,15 +89,27 @@
 
 	let importInput: HTMLInputElement | null = null;
 	let shareUrl = $state('');
+	let equationQuery = $state('');
 	let resizingSidebar = $state(false);
 	let settingsSections = $state({ ...DEFAULT_SETTINGS_SECTIONS });
 	let mobileToolbarOpen = $state(false);
+	let sidebarSwipeStart: { x: number; y: number } | null = $state(null);
+	let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const canUndo = $derived(graph.historyIndex > 0);
 	const canRedo = $derived(graph.historyIndex < graph.historySize - 1);
-	const equationCount = $derived(graph.equations.length);
-	const visibleCount = $derived(graph.equations.filter((equation) => equation.visible).length);
+	const filteredEquations = $derived.by(() => {
+		const needle = equationQuery.trim().toLowerCase();
+		const indexed = graph.equations.map((equation, index) => ({ equation, index }));
 
+		if (!needle) {
+			return indexed;
+		}
+
+		return indexed.filter(({ equation }) =>
+			`${equation.raw} ${equation.label}`.toLowerCase().includes(needle)
+		);
+	});
 	function addEquation(raw = ''): void {
 		const equation = graph.addEquation(raw);
 		ui.activeEquationId = equation.id;
@@ -118,8 +133,21 @@
 		if (!first || !second) {
 			return;
 		}
-		graph.addEquation(`y >= (${first.raw.trim()})`, 'inequality');
-		graph.addEquation(`y <= (${second.raw.trim()})`, 'inequality');
+
+		const upper = parseEquation(first.raw, 'cartesian');
+		const lower = parseEquation(second.raw, 'cartesian');
+
+		if (upper.error || lower.error || !upper.normalized || !lower.normalized) {
+			ui.pushToast({
+				title: 'Shade between unavailable',
+				description: 'Plotrix could not normalize one of the selected equations safely.',
+				tone: 'warning'
+			});
+			return;
+		}
+
+		graph.addEquation(`y >= (${upper.normalized})`, 'inequality');
+		graph.addEquation(`y <= (${lower.normalized})`, 'inequality');
 		ui.pushToast({
 			title: 'Shaded region added',
 			description: 'Created an inequality pair between the selected curves.',
@@ -127,8 +155,40 @@
 		});
 	}
 
+	function handleSidebarPointerDown(event: PointerEvent): void {
+		if (
+			event.pointerType !== 'touch' ||
+			typeof window === 'undefined' ||
+			window.innerWidth >= 960 ||
+			!ui.sidebarOpen
+		) {
+			sidebarSwipeStart = null;
+			return;
+		}
+
+		sidebarSwipeStart = { x: event.clientX, y: event.clientY };
+	}
+
+	function handleSidebarPointerUp(event: PointerEvent): void {
+		if (!sidebarSwipeStart) {
+			return;
+		}
+
+		const deltaX = event.clientX - sidebarSwipeStart.x;
+		const deltaY = Math.abs(event.clientY - sidebarSwipeStart.y);
+		sidebarSwipeStart = null;
+
+		if (deltaX < -72 && deltaY < 44) {
+			ui.setSidebarOpen(false);
+		}
+	}
+
 	function toggleTheme(): void {
 		graph.updateSettings({ theme: nextTheme(graph.settings.theme) });
+	}
+
+	function applyTheme(theme: 'system' | 'light' | 'dark'): void {
+		graph.updateSettings({ theme });
 	}
 
 	async function exportPNG(scale: 1 | 2 | 3): Promise<void> {
@@ -246,7 +306,7 @@
 		}
 
 		try {
-			graph.importJSON(await file.text());
+			await graph.importJSON(await file.text());
 			ui.activeEquationId = graph.equations[0]?.id ?? null;
 			ui.announce('Session imported');
 			ui.pushToast({
@@ -304,7 +364,6 @@
 			category: 'View',
 			title: 'Fit all curves',
 			description: 'Auto-frame the visible equations in the canvas.',
-			shortcut: 'F',
 			run: () => graph.fitAll()
 		},
 		{
@@ -417,43 +476,48 @@
 			}
 		}
 
-		try {
-			if (hash.startsWith('#plotrix=')) {
-				graph.importJSON(hash);
-				restored = true;
-			} else {
-				const stored = localStorage.getItem('plotrix-session');
-
-				if (stored) {
-					graph.importJSON(stored);
+		void (async () => {
+			try {
+				if (hash.startsWith('#plotrix=')) {
+					await graph.importJSON(hash);
 					restored = true;
+				} else {
+					const stored = localStorage.getItem('plotrix-session');
+
+					if (stored) {
+						await graph.importJSON(stored);
+						restored = true;
+					}
 				}
+			} catch {
+				localStorage.removeItem('plotrix-session');
+				ui.pushToast({
+					title: 'Previous session skipped',
+					description: 'Plotrix started fresh because the saved session could not be restored.',
+					tone: 'warning'
+				});
 			}
-		} catch {
-			localStorage.removeItem('plotrix-session');
-			ui.pushToast({
-				title: 'Previous session skipped',
-				description: 'Plotrix started fresh because the saved session could not be restored.',
-				tone: 'warning'
-			});
-		}
 
-		if (hash === '#new') {
-			addEquation('');
-		}
+			if (hash === '#new') {
+				addEquation('');
+			}
 
-		if (hash === '#share') {
-			openShareModal();
-		}
+			if (hash === '#share') {
+				openShareModal();
+			}
 
-		if (!restored && !graph.equations.length) {
-			graph.seedStarterEquations();
-		}
+			if (!restored && !graph.equations.length) {
+				graph.seedStarterEquations();
+			}
 
-		ui.activeEquationId = graph.equations[0]?.id ?? null;
+			ui.activeEquationId = graph.equations[0]?.id ?? null;
+		})();
 	});
 
 	onDestroy(() => {
+		if (sessionSaveTimer) {
+			clearTimeout(sessionSaveTimer);
+		}
 		graph.destroy();
 	});
 
@@ -481,9 +545,22 @@
 			return;
 		}
 
-		graph.historyIndex;
-		graph.historySize;
-		localStorage.setItem('plotrix-session', graph.exportJSON());
+		void graph.historyIndex;
+		void graph.historySize;
+
+		if (sessionSaveTimer) {
+			clearTimeout(sessionSaveTimer);
+		}
+
+		sessionSaveTimer = setTimeout(() => {
+			const snapshot = graph.exportJSON();
+
+			if (snapshot.length <= 512_000) {
+				localStorage.setItem('plotrix-session', snapshot);
+			}
+
+			sessionSaveTimer = null;
+		}, 2000);
 	});
 </script>
 
@@ -512,6 +589,7 @@
 			<IconButton
 				label={ui.sidebarOpen ? 'Hide panel' : 'Show panel'}
 				size={36}
+				touchLabel="Panel"
 				onClick={() => ui.setSidebarOpen(!ui.sidebarOpen)}
 			>
 				<Icon
@@ -521,7 +599,12 @@
 				/>
 			</IconButton>
 
-			<IconButton label="Command" size={36} onClick={() => ui.setCommandPaletteOpen(true)}>
+			<IconButton
+				label="Command"
+				size={36}
+				touchLabel="Command"
+				onClick={() => ui.setCommandPaletteOpen(true)}
+			>
 				<Icon icon={Terminal} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 		</div>
@@ -529,11 +612,23 @@
 		<div class="toolbar-divider toolbar-divider-push" aria-hidden="true"></div>
 
 		<div class="toolbar-cluster">
-			<IconButton label="Undo" size={36} disabled={!canUndo} onClick={() => graph.undoHistory()}>
+			<IconButton
+				label="Undo"
+				size={36}
+				touchLabel="Undo"
+				disabled={!canUndo}
+				onClick={() => graph.undoHistory()}
+			>
 				<Icon icon={Undo2} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 
-			<IconButton label="Redo" size={36} disabled={!canRedo} onClick={() => graph.redoHistory()}>
+			<IconButton
+				label="Redo"
+				size={36}
+				touchLabel="Redo"
+				disabled={!canRedo}
+				onClick={() => graph.redoHistory()}
+			>
 				<Icon icon={Redo2} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 		</div>
@@ -559,6 +654,10 @@
 
 			<IconButton label="Share" size={36} onClick={openShareModal}>
 				<Icon icon={Share2} size="var(--icon-lg)" class="toolbar-icon" />
+			</IconButton>
+
+			<IconButton label="Shortcuts" size={36} onClick={() => ui.openModal('shortcuts')}>
+				<Icon icon={CircleHelp} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 		</div>
 
@@ -621,6 +720,17 @@
 				<Icon icon={Share2} size="var(--icon-md)" class="inline-icon" />
 				<span>Share</span>
 			</button>
+			<button
+				type="button"
+				class="toolbar-popover-item"
+				onclick={() => {
+					ui.openModal('shortcuts');
+					closeMobileToolbar();
+				}}
+			>
+				<Icon icon={CircleHelp} size="var(--icon-md)" class="inline-icon" />
+				<span>Shortcuts</span>
+			</button>
 		</div>
 	{/if}
 
@@ -637,18 +747,14 @@
 			onclick={() => ui.setSidebarOpen(false)}
 		></button>
 
-		<aside class:open={ui.sidebarOpen} class="sidebar">
+		<aside
+			class:open={ui.sidebarOpen}
+			class="sidebar"
+			onpointerdown={handleSidebarPointerDown}
+			onpointerup={handleSidebarPointerUp}
+		>
 			<section class="sidebar-panel">
 				<header class="sidebar-header">
-					<div class="brand-lockup">
-						<div class="brand-mark">
-							<img src="/brand/icon.svg" alt="" width="22" height="22" />
-						</div>
-						<div>
-							<p class="brand-title">Plotrix</p>
-						</div>
-					</div>
-
 					<div class="sidebar-actions">
 						<button
 							type="button"
@@ -678,7 +784,7 @@
 						aria-selected={ui.sidebarActiveTab === 'equations'}
 						onclick={() => ui.setSidebarActiveTab('equations')}
 					>
-						<Icon icon={Sigma} size="var(--icon-md)" class="inline-icon" />
+						<Icon icon={FunctionSquare} size="var(--icon-md)" class="inline-icon" />
 						Equations
 					</button>
 					<button
@@ -696,10 +802,32 @@
 
 				{#if ui.sidebarActiveTab === 'equations'}
 					<div class="sidebar-tab-content equation-list">
+						{#if graph.equations.length >= 5}
+							<label class="equation-search">
+								<Icon icon={Search} size="var(--icon-md)" class="equation-search-icon" />
+								<input
+									type="search"
+									bind:value={equationQuery}
+									placeholder="Search equations"
+									aria-label="Search equations"
+								/>
+							</label>
+						{/if}
 						{#if graph.equations.length}
-							{#each graph.equations as equation, index (equation.id)}
-								<EquationCard {graph} {ui} {equation} {index} onActivate={setActiveEquation} />
+							{#each filteredEquations as entry (entry.equation.id)}
+								<EquationCard
+									{graph}
+									{ui}
+									equation={entry.equation}
+									index={entry.index}
+									onActivate={setActiveEquation}
+								/>
 							{/each}
+							{#if equationQuery.trim() && filteredEquations.length === 0}
+								<div class="empty-state compact-empty">
+									<p>No equations match “{equationQuery.trim()}”.</p>
+								</div>
+							{/if}
 						{:else}
 							<div class="empty-state">
 								<p>No equations yet.</p>
@@ -723,18 +851,33 @@
 				{/if}
 				{#if ui.sidebarActiveTab === 'equations'}
 					<div class="sidebar-footer">
-						<p class="selection-hint">
-							Select two equations with `Shift` + click to shade between them.
-						</p>
-						{#if ui.selectedEquationIds.size === 2}
-							<button
-								type="button"
-								class="compact-action compact-action-neutral shade-between"
-								onclick={shadeBetweenSelected}
-							>
-								Shade between
-							</button>
-						{/if}
+						<button
+							type="button"
+							class="compact-action compact-action-neutral shade-between"
+							title="Select two cartesian equations with Shift + click to shade between them."
+							onclick={shadeBetweenSelected}
+							disabled={
+								ui.selectedEquationIds.size !== 2 ||
+								graph.equations
+									.filter((equation) => ui.selectedEquationIds.has(equation.id))
+									.some((equation) => equation.kind !== 'cartesian')
+							}
+						>
+							Shade between
+						</button>
+
+						<div class="theme-switcher" role="group" aria-label="Theme">
+							{#each themeOptions as option (option.value)}
+								<button
+									type="button"
+									class:active={graph.settings.theme === option.value}
+									onclick={() => applyTheme(option.value as 'system' | 'light' | 'dark')}
+								>
+									{option.label.slice(0, 1)}
+									<span class="sr-only">{option.label}</span>
+								</button>
+							{/each}
+						</div>
 					</div>
 				{/if}
 			</section>
@@ -776,7 +919,9 @@
 				<Icon
 					icon={ChevronDown}
 					size="var(--icon-md)"
-					class={`section-chevron ${!settingsSections.appearance ? 'collapsed' : ''}`}
+					class={!settingsSections.appearance
+						? 'section-chevron chevron-rotated'
+						: 'section-chevron'}
 				/>
 			</button>
 			{#if settingsSections.appearance}
@@ -799,7 +944,7 @@
 
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<Icon icon={Sigma} size="var(--icon-lg)" class="setting-icon" />
+							<Icon icon={FunctionSquare} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-axis-labels-label">Axis labels</strong>
@@ -862,7 +1007,7 @@
 				<Icon
 					icon={ChevronDown}
 					size="var(--icon-md)"
-					class={`section-chevron ${!settingsSections.grid ? 'collapsed' : ''}`}
+					class={!settingsSections.grid ? 'section-chevron chevron-rotated' : 'section-chevron'}
 				/>
 			</button>
 			{#if settingsSections.grid}
@@ -941,7 +1086,9 @@
 				<Icon
 					icon={ChevronDown}
 					size="var(--icon-md)"
-					class={`section-chevron ${!settingsSections.analysis ? 'collapsed' : ''}`}
+					class={!settingsSections.analysis
+						? 'section-chevron chevron-rotated'
+						: 'section-chevron'}
 				/>
 			</button>
 			{#if settingsSections.analysis}
@@ -995,7 +1142,9 @@
 				<Icon
 					icon={ChevronDown}
 					size="var(--icon-md)"
-					class={`section-chevron ${!settingsSections.rendering ? 'collapsed' : ''}`}
+					class={!settingsSections.rendering
+						? 'section-chevron chevron-rotated'
+						: 'section-chevron'}
 				/>
 			</button>
 			{#if settingsSections.rendering}
@@ -1088,7 +1237,13 @@
 			<div class="share-field-icon" aria-hidden="true">
 				<Icon icon={Lock} size="var(--icon-md)" class="inline-icon" />
 			</div>
-			<input class="share-readonly" readonly value={shareUrl} />
+			<input
+				class="share-readonly"
+				aria-label="Share URL (read-only)"
+				readonly
+				title="Read-only share URL"
+				value={shareUrl}
+			/>
 		</div>
 		<p class="share-note">Read-only link generated from the current Plotrix session.</p>
 		<div class="share-actions">
@@ -1149,6 +1304,7 @@
 		padding: 0 var(--space-4);
 		border-bottom: 1px solid var(--color-border);
 		background: var(--color-bg-surface);
+		box-shadow: var(--shadow-sm);
 	}
 
 	.toolbar-mobile-actions {
@@ -1187,10 +1343,9 @@
 		min-width: 180px;
 		padding: var(--space-3);
 		border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
-		border-radius: var(--radius-xl);
-		background: color-mix(in srgb, var(--color-bg-surface) 96%, transparent);
+		border-radius: var(--radius-lg);
+		background: var(--color-bg-surface);
 		box-shadow: var(--shadow-lg);
-		backdrop-filter: blur(12px);
 	}
 
 	.toolbar-popover-item {
@@ -1219,6 +1374,8 @@
 		color: var(--color-text-primary);
 		font-size: var(--text-sm);
 		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
 	}
 
 	.topbar-brand img {
@@ -1259,6 +1416,7 @@
 		z-index: var(--z-sidebar);
 		min-height: 0;
 		min-width: 0;
+		touch-action: pan-y;
 		transition:
 			opacity var(--duration-normal) var(--ease-default),
 			transform var(--duration-normal) var(--ease-default);
@@ -1279,49 +1437,15 @@
 		padding: var(--space-4);
 		border: 1px solid var(--color-border);
 		border-radius: calc(var(--radius-2xl) + 2px);
-		background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
+		background: var(--color-bg-surface);
 		box-shadow: var(--shadow-lg);
-		backdrop-filter: blur(12px);
 	}
 
 	.sidebar-header {
 		display: flex;
-		align-items: center;
-		justify-content: space-between;
+		align-items: stretch;
+		justify-content: flex-start;
 		gap: var(--space-3);
-	}
-
-	.brand-lockup {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		min-width: 0;
-	}
-
-	.brand-mark {
-		display: grid;
-		place-items: center;
-		width: 32px;
-		height: 32px;
-		border-radius: 10px;
-		background: var(--color-bg-overlay);
-		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border) 80%, transparent);
-	}
-
-	.brand-mark img {
-		width: 22px;
-		height: 22px;
-	}
-
-	.brand-title {
-		font-size: var(--text-md);
-		font-weight: var(--font-weight-semibold);
-		color: var(--color-text-primary);
-	}
-
-	:global(.brand-subtitle) {
-		font-size: var(--text-xs);
-		color: var(--color-text-secondary);
 	}
 
 	.sidebar-actions {
@@ -1334,7 +1458,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 8px;
-		height: 32px;
+		height: 36px;
 		padding: 0 var(--space-3);
 		border-radius: var(--radius-md);
 		font-size: var(--text-sm);
@@ -1450,10 +1574,32 @@
 		display: grid;
 		flex: 1;
 		align-content: start;
-		gap: var(--space-3);
+		gap: var(--space-2);
 		min-height: 0;
 		overflow: auto;
 		scrollbar-gutter: stable;
+	}
+
+	.equation-search {
+		position: relative;
+		display: grid;
+	}
+
+	.equation-search input {
+		height: 36px;
+		padding: 0 var(--space-3) 0 calc(var(--space-3) + 22px);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-base);
+		color: var(--color-text-primary);
+	}
+
+	:global(.equation-search-icon) {
+		position: absolute;
+		top: 50%;
+		left: var(--space-3);
+		transform: translateY(-50%);
+		color: var(--color-text-muted);
 	}
 
 	.shade-between {
@@ -1462,14 +1608,37 @@
 
 	.sidebar-footer {
 		display: grid;
-		gap: var(--space-2);
+		gap: var(--space-3);
 		padding-top: var(--space-2);
 		border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
 	}
 
-	.selection-hint {
+	.theme-switcher {
+		display: inline-flex;
+		gap: var(--space-2);
+	}
+
+	.theme-switcher button {
+		width: 32px;
+		height: 32px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-full);
+		background: var(--color-bg-base);
 		color: var(--color-text-secondary);
 		font-size: var(--text-xs);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+
+	.theme-switcher button.active {
+		border-color: var(--color-accent);
+		background: var(--color-accent-subtle);
+		color: var(--color-accent);
+	}
+
+	.compact-empty {
+		padding-top: var(--space-3);
 	}
 
 	.empty-state {
@@ -1565,10 +1734,6 @@
 		transition: transform var(--duration-fast) var(--ease-default);
 	}
 
-	:global(.section-chevron.collapsed) {
-		transform: rotate(-90deg);
-	}
-
 	.settings-category-body {
 		display: grid;
 		padding: 0 var(--space-4);
@@ -1637,7 +1802,7 @@
 	}
 
 	.export-grid {
-		grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: var(--space-3);
 	}
 
@@ -1646,7 +1811,7 @@
 		gap: var(--space-2);
 		padding: var(--space-4);
 		border: 1px solid var(--color-border);
-		border-radius: var(--radius-xl);
+		border-radius: var(--radius-lg);
 		background: var(--color-bg-base);
 		text-align: left;
 		cursor: pointer;
@@ -1672,9 +1837,9 @@
 		display: grid;
 		grid-template-columns: 40px minmax(0, 1fr);
 		align-items: center;
-		border: 1px solid var(--color-border);
+		border: 1px dashed var(--color-border-strong);
 		border-radius: var(--radius-lg);
-		background: color-mix(in srgb, var(--color-bg-overlay) 92%, var(--color-bg-base));
+		background: var(--color-bg-base);
 	}
 
 	.share-field-icon {
@@ -1690,6 +1855,7 @@
 		border: 0;
 		background: transparent;
 		color: var(--color-text-primary);
+		cursor: text;
 	}
 
 	.share-readonly {
@@ -1756,7 +1922,7 @@
 		font-size: var(--text-xs);
 	}
 
-	@media (max-width: 1100px) {
+	@media (max-width: 1024px) {
 		.settings-list {
 			grid-template-columns: 1fr;
 		}
@@ -1848,11 +2014,6 @@
 
 		.setting-row-nested {
 			padding-left: var(--space-4);
-		}
-
-		.sidebar-header {
-			flex-direction: column;
-			align-items: stretch;
 		}
 
 		.sidebar-actions,

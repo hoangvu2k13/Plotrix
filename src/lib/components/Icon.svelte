@@ -17,7 +17,7 @@
 	- analyze -> BarChart2
 	- zoom in / out -> Plus / Minus
 	- fit -> Maximize2
-	- reset -> Home
+	- reset -> RotateCcw
 	- search -> Search
 	- warning -> AlertTriangle
 	- play / stop -> Play / Square
@@ -27,6 +27,7 @@
 	- drag handle -> GripVertical
 	- crosshair -> Crosshair
 	- trace -> MousePointer2
+	- equations tab -> FunctionSquare
 	- grid -> Grid3x3
 	- intersection -> X
 	*/

@@ -25,7 +25,7 @@
 		let previous = performance.now();
 
 		const step = (now: number) => {
-			const elapsed = (now - previous) / 1000;
+			const elapsed = Math.min(now - previous, 33) / 1000;
 			previous = now;
 			const delta = variable.step * 60 * elapsed;
 			let next = variable.value + delta;
@@ -61,7 +61,7 @@
 			<Icon
 				icon={ChevronDown}
 				size="var(--icon-md)"
-				class={`header-icon ${collapsed ? 'collapsed' : ''}`}
+				class={collapsed ? 'header-icon chevron-rotated' : 'header-icon'}
 			/>
 		</button>
 
@@ -175,10 +175,6 @@
 
 	:global(.header-icon) {
 		transition: transform var(--duration-fast) var(--ease-default);
-	}
-
-	:global(.header-icon.collapsed) {
-		transform: rotate(-90deg);
 	}
 
 	.rows,

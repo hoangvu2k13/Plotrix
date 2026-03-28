@@ -1,6 +1,5 @@
 import { fileURLToPath, URL } from 'node:url';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { compression, defineAlgorithm } from 'vite-plugin-compression2';
 import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vite';
 
@@ -21,7 +20,7 @@ export default defineConfig({
 		sveltekit(),
 		VitePWA({
 			registerType: 'autoUpdate',
-			injectRegister: 'auto',
+			injectRegister: 'inline',
 			includeAssets: [
 				'brand/icon.svg',
 				'brand/maskable.svg',
@@ -82,7 +81,7 @@ export default defineConfig({
 				globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest,woff2,txt}'],
 				navigateFallback: '/',
 				cleanupOutdatedCaches: true,
-				sourcemap: true,
+				sourcemap: false,
 				runtimeCaching: [
 					{
 						urlPattern: ({ request }) => request.destination === 'document',
@@ -119,13 +118,6 @@ export default defineConfig({
 			devOptions: {
 				enabled: false
 			}
-		}),
-		compression({
-			threshold: 8 * 1024,
-			deleteOriginalAssets: false,
-			algorithms: [
-				defineAlgorithm('gzip', { level: 9 })
-			]
 		})
 	],
 	optimizeDeps: {
@@ -157,33 +149,55 @@ export default defineConfig({
 	build: {
 		target: 'es2022',
 		sourcemap: false,
-		cssCodeSplit: true,
 		modulePreload: {
 			polyfill: true
 		},
-		reportCompressedSize: true,
-		assetsInlineLimit: 4096,
+		reportCompressedSize: false,
+		assetsInlineLimit: 8192,
 		chunkSizeWarningLimit: 700,
 		minify: 'esbuild',
-		copyPublicDir: true,
+		copyPublicDir: false,
 		rollupOptions: {
 			treeshake: true,
 			output: {
 				manualChunks(id) {
 					if (id.includes('node_modules/@codemirror')) {
-						return 'codemirror';
+						return 'editor';
 					}
 
 					if (id.includes('node_modules/mathjs')) {
-						return 'mathjs';
+						return 'math-engine';
 					}
 
 					if (id.includes('node_modules/katex')) {
-						return 'katex';
+						return 'math-typesetting';
+					}
+
+					if (id.includes('node_modules/@lucide') || id.includes('node_modules/phosphor-svelte')) {
+						return 'icons';
 					}
 
 					if (id.includes('node_modules/vite-plugin-pwa') || id.includes('workbox')) {
 						return 'pwa';
+					}
+
+					if (
+						id.includes('/src/lib/state/graph.svelte.ts') ||
+						id.includes('/src/lib/math/') ||
+						id.includes('/src/lib/analysis/') ||
+						id.includes('/src/lib/renderer/')
+					) {
+						return 'graph-core';
+					}
+
+					if (
+						id.includes('/src/lib/components/AnalysisPanel.svelte') ||
+						id.includes('/src/lib/components/DataPanel.svelte') ||
+						id.includes('/src/lib/components/RegressionPanel.svelte') ||
+						id.includes('/src/lib/components/VariableSliderPanel.svelte') ||
+						id.includes('/src/lib/components/CommandPalette.svelte')
+					) {
+						return 'panels';
 					}
 
 					if (id.includes('node_modules')) {

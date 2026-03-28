@@ -1,4 +1,4 @@
-import { evaluateCartesianAt } from '$lib/math/engine';
+import { evaluateCartesianAt, evaluateParametric } from '$lib/math/engine';
 import type { CanvasRenderer } from '$lib/renderer/canvas';
 import type { GraphState } from '$stores/graph.svelte';
 import type { UiState } from '$stores/ui.svelte';
@@ -281,19 +281,52 @@ export class InteractionManager {
 		}
 
 		const [mathX] = this.renderer.canvasToMath(canvasX, canvasY);
+		const scope = this.graph.variableScope();
 		let best: {
 			distance: number;
 			x: number;
 			y: number;
 			equationId: string;
+			detail?: string;
 		} | null = null;
 
 		for (const equation of this.graph.equations) {
-			if (!equation.visible || equation.errorMessage || equation.isParametric) {
+			if (!equation.visible || equation.errorMessage) {
 				continue;
 			}
 
-			const y = evaluateCartesianAt(equation.compiledExpression ?? equation.compiled, mathX);
+			if (equation.isParametric && equation.parametricNodes) {
+				const [tStart, tEnd] = equation.paramRange;
+
+				for (let index = 0; index <= 180; index += 1) {
+					const t = tStart + ((tEnd - tStart) * index) / 180;
+					const point = evaluateParametric(equation.parametricNodes, t, scope);
+
+					if (!point) {
+						continue;
+					}
+
+					const [cx, cy] = this.renderer.mathToCanvas(point.x, point.y);
+					const distance = Math.hypot(cx - canvasX, cy - canvasY);
+
+					if (!best || distance < best.distance) {
+						best = {
+							distance,
+							x: point.x,
+							y: point.y,
+							equationId: equation.id,
+							detail: `· t=${t.toPrecision(4)}`
+						};
+					}
+				}
+				continue;
+			}
+
+			const y = evaluateCartesianAt(
+				equation.compiledExpression ?? equation.compiled,
+				mathX,
+				scope
+			);
 
 			if (y === null) {
 				continue;
@@ -308,7 +341,17 @@ export class InteractionManager {
 		}
 
 		if (best && best.distance < 42) {
-			this.ui.setTracePoint({ x: best.x, y: best.y, equationId: best.equationId });
+			const tracePoint = {
+				x: best.x,
+				y: best.y,
+				equationId: best.equationId
+			} as { x: number; y: number; equationId: string; detail?: string };
+
+			if (best.detail) {
+				tracePoint.detail = best.detail;
+			}
+
+			this.ui.setTracePoint(tracePoint);
 		} else {
 			this.ui.setTracePoint(null);
 		}
@@ -331,12 +374,30 @@ export class InteractionManager {
 
 		if ((modifier && lower === 'y') || (modifier && lower === 'z' && event.shiftKey)) {
 			event.preventDefault();
+			if (this.graph.historyIndex >= this.graph.historySize - 1) {
+				this.ui.pushToast({
+					title: 'Nothing to redo',
+					description: 'Plotrix is already at the newest history state.',
+					tone: 'info',
+					duration: 1500
+				});
+				return;
+			}
 			this.graph.redoHistory();
 			return;
 		}
 
 		if (modifier && lower === 'z') {
 			event.preventDefault();
+			if (this.graph.historyIndex <= 0) {
+				this.ui.pushToast({
+					title: 'Nothing to undo',
+					description: 'Plotrix is already at the oldest history state.',
+					tone: 'info',
+					duration: 1500
+				});
+				return;
+			}
 			this.graph.undoHistory();
 			return;
 		}
@@ -430,17 +491,11 @@ export class InteractionManager {
 				this.ui.pingInteraction();
 				this.graph.resetView();
 				break;
-			case 'f':
-			case 'F':
-				event.preventDefault();
-				this.ui.pingInteraction();
-				this.graph.fitAll();
-				break;
 			case 'Escape':
-				this.ui.commandPaletteOpen = false;
-				this.ui.closeModal();
+				if (this.ui.commandPaletteOpen || this.ui.modalOpen || this.ui.activeAnalysisEquationId) {
+					return;
+				}
 				this.ui.activeEquationId = null;
-				this.ui.activeAnalysisEquationId = null;
 				break;
 			default:
 				break;

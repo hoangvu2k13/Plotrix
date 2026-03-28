@@ -2,11 +2,11 @@
 	import { autocompletion, closeBrackets, completeFromList } from '@codemirror/autocomplete';
 	import { EditorState } from '@codemirror/state';
 	import { bracketMatching } from '@codemirror/language';
-	import { linter } from '@codemirror/lint';
+	import { forceLinting, linter } from '@codemirror/lint';
 	import { EditorView, keymap } from '@codemirror/view';
 	import { onMount } from 'svelte';
 
-	import { parseEquation, type EquationKind } from '$lib/math/engine';
+	import type { EquationKind } from '$lib/math/engine';
 
 	let {
 		value = '',
@@ -14,6 +14,8 @@
 		ariaLabel = 'Equation editor',
 		prefix = '',
 		kind = 'cartesian',
+		singleLine = false,
+		errorMessage = null,
 		onChange,
 		onFocus,
 		onBlur
@@ -23,6 +25,8 @@
 		ariaLabel?: string;
 		prefix?: string;
 		kind?: EquationKind;
+		singleLine?: boolean;
+		errorMessage?: string | null;
 		onChange?: (value: string) => void;
 		onFocus?: () => void;
 		onBlur?: () => void;
@@ -31,8 +35,17 @@
 	let host: HTMLDivElement | null = null;
 	let view: EditorView | null = null;
 
-	const mathCompletions = completeFromList(
-		[
+	function completionEntries(kind: EquationKind) {
+		const variables =
+			kind === 'parametric'
+				? ['t']
+				: kind === 'polar'
+					? ['t', 'theta']
+					: kind === 'implicit'
+						? ['x', 'y']
+						: ['x'];
+
+		return [
 			'sin',
 			'cos',
 			'tan',
@@ -55,17 +68,17 @@
 			'pow',
 			'pi',
 			'e',
-			'x',
-			'y',
-			't'
-		].map((label) => ({ label, type: 'function' }))
-	);
+			...variables
+		].map((label) => ({
+			label,
+			type: label.length === 1 || label === 'theta' ? 'variable' : 'function'
+		}));
+	}
 
 	const mathLinter = linter((view) => {
 		const source = view.state.doc.toString();
-		const parsed = parseEquation(source, kind);
 
-		if (!source.trim() || !parsed.error) {
+		if (!source.trim() || !errorMessage) {
 			return [];
 		}
 
@@ -74,7 +87,7 @@
 				from: 0,
 				to: Math.max(1, source.length),
 				severity: 'error',
-				message: parsed.error
+				message: errorMessage
 			}
 		];
 	});
@@ -130,6 +143,15 @@
 		}
 	});
 
+	const singleLineEnterKeymap = keymap.of([
+		{
+			key: 'Enter',
+			run() {
+				return true;
+			}
+		}
+	]);
+
 	onMount(() => {
 		if (!host) {
 			return;
@@ -140,11 +162,11 @@
 				doc: value,
 				extensions: [
 					theme,
-					EditorView.lineWrapping,
+					...(singleLine ? [] : [EditorView.lineWrapping]),
 					bracketMatching(),
 					closeBrackets(),
 					autocompletion({
-						override: [mathCompletions]
+						override: [(context) => completeFromList(completionEntries(kind))(context)]
 					}),
 					mathLinter,
 					EditorView.updateListener.of((update) => {
@@ -160,14 +182,7 @@
 							onBlur?.();
 						}
 					}),
-					keymap.of([
-						{
-							key: 'Enter',
-							run() {
-								return true;
-							}
-						}
-					])
+					...(singleLine ? [singleLineEnterKeymap] : [])
 				]
 			}),
 			parent: host
@@ -198,6 +213,13 @@
 			});
 		}
 	});
+
+	$effect(() => {
+		void errorMessage;
+		if (view) {
+			forceLinting(view);
+		}
+	});
 </script>
 
 <div
@@ -206,6 +228,7 @@
 	aria-label={ariaLabel}
 	data-empty={value.length === 0}
 	data-prefixed={prefix.length > 0}
+	data-single-line={singleLine}
 >
 	{#if prefix}
 		<div class="prefix-wrap" aria-hidden="true">
@@ -263,8 +286,8 @@
 	.editor-body {
 		position: relative;
 		display: flex;
-		align-items: stretch;
 		min-width: 0;
+		width: 100%;
 		min-height: 44px;
 		max-height: 200px;
 		padding: 0 var(--space-4);
@@ -277,6 +300,21 @@
 		min-width: 0;
 		min-height: 44px;
 		max-height: 200px;
+	}
+
+	.editor-shell[data-single-line='true'] .editor-body,
+	.editor-shell[data-single-line='true'] .editor-host {
+		max-height: 44px;
+	}
+
+	.editor-shell[data-single-line='true'] :global(.cm-scroller) {
+		overflow-x: auto;
+		overflow-y: hidden;
+	}
+
+	.editor-shell[data-single-line='true'] :global(.cm-content) {
+		padding: 0.7rem 0;
+		white-space: nowrap;
 	}
 
 	.prefix {

@@ -13,7 +13,5 @@ export const EXTENDED_COLOR_PALETTE = [
 	...COLOR_PALETTE,
 	'#22c55e',
 	'#eab308',
-	'#64748b',
-	'#ffffff',
-	'#09090b'
+	'#64748b'
 ] as const;

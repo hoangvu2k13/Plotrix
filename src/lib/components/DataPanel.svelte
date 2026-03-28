@@ -1,11 +1,12 @@
 <script lang="ts">
-	import { Plus, ScatterChart, Trash2, TrendingUp, Upload } from '@lucide/svelte';
+	import { Download, Plus, ScatterChart, Trash2, TrendingUp, Upload } from '@lucide/svelte';
 
 	import ColorPicker from '$components/ColorPicker.svelte';
 	import Icon from '$components/Icon.svelte';
 	import Slider from '$components/Slider.svelte';
 	import type { DataSeries, GraphState } from '$stores/graph.svelte';
 	import type { UiState } from '$stores/ui.svelte';
+	import { saveText } from '$utils/download';
 
 	let { graph, ui } = $props<{ graph: GraphState; ui: UiState }>();
 
@@ -101,24 +102,35 @@
 		truncatedRows: boolean;
 	} {
 		const rows: string[][] = [];
-		let current = '';
+		let current: string[] = [];
 		let row: string[] = [];
 		let quoted = false;
 		let truncatedColumns = false;
 		let truncatedRows = false;
+
+		const flushField = () => {
+			const value = current.join('');
+			current = [];
+
+			if (row.length < MAX_CSV_COLUMNS) {
+				row.push(value);
+			} else {
+				truncatedColumns = true;
+			}
+		};
 
 		for (let index = 0; index < text.length; index += 1) {
 			const char = text[index]!;
 			const next = text[index + 1];
 
 			if (char === '"' && quoted && next === '"') {
-				current += '"';
+				current.push('"');
 				index += 1;
 				continue;
 			}
 
 			if (char === '\\' && quoted && next === '"') {
-				current += '"';
+				current.push('"');
 				index += 1;
 				continue;
 			}
@@ -129,41 +141,27 @@
 			}
 
 			if (char === ',' && !quoted) {
-				if (row.length < MAX_CSV_COLUMNS) {
-					row.push(current);
-				} else {
-					truncatedColumns = true;
-				}
-				current = '';
+				flushField();
 				continue;
 			}
 
 			if ((char === '\n' || char === '\r') && !quoted) {
 				if (char === '\r' && next === '\n') index += 1;
-				if (row.length < MAX_CSV_COLUMNS) {
-					row.push(current);
-				} else {
-					truncatedColumns = true;
-				}
+				flushField();
 				rows.push(row.slice(0, MAX_CSV_COLUMNS));
 				if (rows.length >= MAX_CSV_ROWS) {
 					truncatedRows = true;
 					break;
 				}
 				row = [];
-				current = '';
 				continue;
 			}
 
-			current += char;
+			current.push(char);
 		}
 
 		if ((current.length || row.length) && rows.length < MAX_CSV_ROWS) {
-			if (row.length < MAX_CSV_COLUMNS) {
-				row.push(current);
-			} else {
-				truncatedColumns = true;
-			}
+			flushField();
 			rows.push(row.slice(0, MAX_CSV_COLUMNS));
 		}
 
@@ -226,6 +224,34 @@
 			.map((row) => ({ x: Number(row[0]), y: Number(row[1]) }))
 			.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
 	}
+
+	function escapeCsvCell(value: string): string {
+		if (/[",\n\r]/.test(value)) {
+			return `"${value.replaceAll('"', '""')}"`;
+		}
+
+		return value;
+	}
+
+	function exportCsv(series: DataSeries): void {
+		const lines = [
+			series.columns.map((column) => escapeCsvCell(column.name)).join(','),
+			...series.rows
+				.filter((row) => row.some((cell) => cell.trim().length > 0))
+				.map((row) =>
+					series.columns
+						.map((_, columnIndex) => escapeCsvCell(row[columnIndex] ?? ''))
+						.join(',')
+				)
+		];
+
+		saveText(lines.join('\n'), `${series.name.toLowerCase().replace(/\s+/g, '-') || 'plotrix-data'}.csv`, 'text/csv;charset=utf-8');
+		ui.pushToast({
+			title: 'CSV exported',
+			description: `${series.name} was exported as CSV.`,
+			tone: 'success'
+		});
+	}
 </script>
 
 <input bind:this={importInput} type="file" accept=".csv" class="sr-only" onchange={importCsv} />
@@ -264,6 +290,7 @@
 									contenteditable="true"
 									role="textbox"
 									aria-label={`Column ${columnIndex + 1} name`}
+									tabindex="0"
 									onblur={(event) =>
 										renameColumn(
 											activeSheet,
@@ -374,21 +401,6 @@
 				/>
 			</label>
 
-			<label class="toggle">
-				<input
-					type="checkbox"
-					checked={activeSheet.style.showLine}
-					onchange={(event) =>
-						graph.updateDataSeries(activeSheet.id, {
-							style: {
-								...activeSheet.style,
-								showLine: (event.currentTarget as HTMLInputElement).checked
-							}
-						})}
-				/>
-				<span>Connect with line</span>
-			</label>
-
 			<div class="actions">
 				<button
 					type="button"
@@ -424,6 +436,10 @@
 				<button type="button" class="secondary" onclick={() => importInput?.click()}>
 					<Icon icon={Upload} size="var(--icon-md)" class="action-icon" />
 					<span>Import CSV</span>
+				</button>
+				<button type="button" class="secondary" onclick={() => exportCsv(activeSheet)}>
+					<Icon icon={Download} size="var(--icon-md)" class="action-icon" />
+					<span>Export CSV</span>
 				</button>
 			</div>
 		</div>
@@ -484,6 +500,7 @@
 
 	th div,
 	td div {
+		min-width: 1em;
 		min-height: 28px;
 		padding: var(--space-2);
 		font-family: var(--font-mono);
@@ -491,6 +508,7 @@
 		outline: none;
 	}
 
+	th div:focus,
 	td div:focus {
 		border-color: var(--color-accent);
 		box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
@@ -631,10 +649,6 @@
 		display: inline-flex;
 		align-items: center;
 		gap: var(--space-2);
-	}
-
-	.toggle span {
-		font-size: var(--text-sm);
 	}
 
 	.sheet-tabs {

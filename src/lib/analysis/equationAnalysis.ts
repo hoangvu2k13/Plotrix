@@ -6,10 +6,12 @@ import {
 	type CriticalPoint
 } from '$lib/analysis/criticalPoints';
 import { formatSig } from '$utils/format';
+import { cluster, derivative, finiteValue, secondDerivative } from '$utils/math';
 
 const math = create(all!, {});
 
 export interface EquationAnalysis {
+	partial?: boolean;
 	domain: string;
 	range: string;
 	zeros: number[];
@@ -39,44 +41,23 @@ const DERIVATIVE_STEP = 1e-5;
 const DOMAIN_SAMPLE_COUNT = 240;
 const RANGE_SAMPLE_COUNT = 512;
 
-function sampleRange(
+function sampleRangeBuffers(
 	evaluate: (x: number) => number | null,
 	xMin: number,
 	xMax: number,
 	count: number
 ) {
-	const values: Array<{ x: number; y: number | null }> = [];
 	const step = count > 1 ? (xMax - xMin) / (count - 1) : 0;
+	const xBuf = new Float64Array(count);
+	const yBuf = new Float64Array(count);
 
 	for (let index = 0; index < count; index += 1) {
 		const x = xMin + step * index;
-		values.push({ x, y: evaluate(x) });
+		xBuf[index] = x;
+		yBuf[index] = evaluate(x) ?? Number.NaN;
 	}
 
-	return values;
-}
-
-function cluster(values: number[], gap = 0.02): number[] {
-	if (!values.length) {
-		return [];
-	}
-
-	const sorted = [...values].sort((left, right) => left - right);
-	const buckets: number[][] = [[sorted[0]!]];
-
-	for (let index = 1; index < sorted.length; index += 1) {
-		const current = sorted[index]!;
-		const lastBucket = buckets[buckets.length - 1]!;
-		const last = lastBucket[lastBucket.length - 1]!;
-
-		if (Math.abs(current - last) <= gap) {
-			lastBucket.push(current);
-		} else {
-			buckets.push([current]);
-		}
-	}
-
-	return buckets.map((bucket) => bucket.reduce((sum, value) => sum + value, 0) / bucket.length);
+	return { xBuf, yBuf };
 }
 
 function viewportBounds(viewport: EquationAnalysisInput['viewport']) {
@@ -113,7 +94,10 @@ function inferDomain(evaluate: (x: number) => number | null): { domain: string; 
 	}
 
 	const clustered = cluster(bad, 0.5).map((value) => formatSig(value));
-	return { domain: `x ≠ ${clustered.join(', ')}`, bad };
+	const preview = clustered.slice(0, 20);
+	const suffix =
+		clustered.length > preview.length ? `, ... ${clustered.length - preview.length} more` : '';
+	return { domain: `x ≠ ${preview.join(', ')}${suffix}`, bad };
 }
 
 function inferRange(
@@ -121,9 +105,16 @@ function inferRange(
 	viewport: EquationAnalysisInput['viewport']
 ): string {
 	const { xMin, xMax } = viewportBounds(viewport);
-	const samples = sampleRange(evaluate, xMin, xMax, RANGE_SAMPLE_COUNT)
-		.map((entry) => entry.y)
-		.filter((value): value is number => value !== null);
+	const { yBuf } = sampleRangeBuffers(evaluate, xMin, xMax, RANGE_SAMPLE_COUNT);
+	const samples: number[] = [];
+
+	for (let index = 0; index < yBuf.length; index += 1) {
+		const value = yBuf[index]!;
+
+		if (Number.isFinite(value)) {
+			samples.push(value);
+		}
+	}
 
 	if (!samples.length) {
 		return 'undefined';
@@ -145,14 +136,20 @@ function detectPeriod(
 ): number | null {
 	const { xMin, xMax } = viewportBounds(viewport);
 	const span = Math.max(1e-6, xMax - xMin);
-	const samples = sampleRange(evaluate, xMin, xMax, 360);
-	const finite = samples.filter((entry): entry is { x: number; y: number } => entry.y !== null);
+	const { xBuf, yBuf } = sampleRangeBuffers(evaluate, xMin, xMax, 360);
+	const finiteIndices: number[] = [];
 
-	if (finite.length < 40) {
+	for (let index = 0; index < yBuf.length; index += 1) {
+		if (Number.isFinite(yBuf[index]!)) {
+			finiteIndices.push(index);
+		}
+	}
+
+	if (finiteIndices.length < 40) {
 		return null;
 	}
 
-	const values = finite.map((entry) => entry.y);
+	const values = finiteIndices.map((index) => yBuf[index]!);
 	const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
 	const centered = values.map((value) => value - mean);
 	const variance = centered.reduce((sum, value) => sum + value * value, 0) / centered.length;
@@ -163,12 +160,14 @@ function detectPeriod(
 
 	const crossings: number[] = [];
 
-	for (let index = 1; index < finite.length; index += 1) {
-		const left = finite[index - 1]!;
-		const right = finite[index]!;
+	for (let offset = 1; offset < finiteIndices.length; offset += 1) {
+		const leftIndex = finiteIndices[offset - 1]!;
+		const rightIndex = finiteIndices[offset]!;
+		const leftY = yBuf[leftIndex]!;
+		const rightY = yBuf[rightIndex]!;
 
-		if (Math.sign(left.y) !== Math.sign(right.y)) {
-			crossings.push((left.x + right.x) / 2);
+		if (Math.sign(leftY) !== Math.sign(rightY)) {
+			crossings.push((xBuf[leftIndex]! + xBuf[rightIndex]!) / 2);
 		}
 	}
 
@@ -199,14 +198,14 @@ function detectPeriod(
 		let mse = 0;
 		let count = 0;
 
-		for (const sample of finite) {
-			const shifted = evaluate(sample.x + candidate);
+		for (const index of finiteIndices) {
+			const shifted = evaluate(xBuf[index]! + candidate);
 
 			if (shifted === null) {
 				continue;
 			}
 
-			const error = sample.y - shifted;
+			const error = yBuf[index]! - shifted;
 			mse += error * error;
 			count += 1;
 		}
@@ -256,26 +255,11 @@ function detectSymmetry(
 }
 
 function derivativeAt(evaluate: (x: number) => number | null, x: number): number | null {
-	const left = evaluate(x - DERIVATIVE_STEP);
-	const right = evaluate(x + DERIVATIVE_STEP);
-
-	if (left === null || right === null) {
-		return null;
-	}
-
-	return (right - left) / (2 * DERIVATIVE_STEP);
+	return derivative((value) => evaluate(value) ?? Number.NaN, x, DERIVATIVE_STEP);
 }
 
 function secondDerivativeAt(evaluate: (x: number) => number | null, x: number): number | null {
-	const left = evaluate(x - DERIVATIVE_STEP);
-	const center = evaluate(x);
-	const right = evaluate(x + DERIVATIVE_STEP);
-
-	if (left === null || center === null || right === null) {
-		return null;
-	}
-
-	return (left - 2 * center + right) / (DERIVATIVE_STEP * DERIVATIVE_STEP);
+	return secondDerivative((value) => evaluate(value) ?? Number.NaN, x, DERIVATIVE_STEP);
 }
 
 function detectVerticalAsymptotes(
@@ -286,23 +270,25 @@ function detectVerticalAsymptotes(
 	const span = Math.max(1, xMax - xMin);
 	const rangeMin = xMin - span;
 	const rangeMax = xMax + span;
-	const samples = sampleRange(evaluate, rangeMin, rangeMax, 320);
+	const { xBuf, yBuf } = sampleRangeBuffers(evaluate, rangeMin, rangeMax, 320);
 	const candidates: number[] = [];
 
-	for (let index = 1; index < samples.length; index += 1) {
-		const left = samples[index - 1]!;
-		const right = samples[index]!;
+	for (let index = 1; index < xBuf.length; index += 1) {
+		const leftX = xBuf[index - 1]!;
+		const rightX = xBuf[index]!;
+		const leftY = yBuf[index - 1]!;
+		const rightY = yBuf[index]!;
 
-		if (left.y === null || right.y === null) {
-			candidates.push((left.x + right.x) / 2);
+		if (!Number.isFinite(leftY) || !Number.isFinite(rightY)) {
+			candidates.push((leftX + rightX) / 2);
 			continue;
 		}
 
-		const slope = Math.abs((right.y - left.y) / Math.max(1e-6, right.x - left.x));
-		const diverging = Math.max(Math.abs(left.y), Math.abs(right.y)) > Math.max(200, span * 10);
+		const slope = Math.abs((rightY - leftY) / Math.max(1e-6, rightX - leftX));
+		const diverging = Math.max(Math.abs(leftY), Math.abs(rightY)) > Math.max(200, span * 10);
 
 		if (slope > 300 && diverging) {
-			candidates.push((left.x + right.x) / 2);
+			candidates.push((leftX + rightX) / 2);
 		}
 	}
 
@@ -312,7 +298,7 @@ function detectVerticalAsymptotes(
 function detectHorizontalAsymptotes(evaluate: (x: number) => number | null) {
 	const probe = (direction: -1 | 1) => {
 		const samples = [1e2, 1e3, 1e4, 1e5, 1e6]
-			.map((value) => evaluate(direction * value))
+			.map((value) => finiteValue(evaluate(direction * value) ?? Number.NaN))
 			.filter((value): value is number => value !== null);
 
 		if (samples.length < 3) {
@@ -359,7 +345,7 @@ function simpsonIntegral(
 	evaluate: (x: number) => number | null,
 	xMin: number,
 	xMax: number,
-	steps = 256
+	steps = 64
 ): number | null {
 	const evenSteps = Math.max(2, steps + (steps % 2));
 	const h = (xMax - xMin) / evenSteps;
@@ -385,12 +371,159 @@ function simpsonIntegral(
 	return (h / 3) * sum;
 }
 
-function integralSummary(input: EquationAnalysisInput): {
-	display: string;
-	expression: string | null;
-} {
-	const { xMin, xMax } = viewportBounds(input.viewport);
-	const source = input.node?.toString() ?? '';
+function simpsonEstimate(a: number, b: number, fa: number, fm: number, fb: number): number {
+	return ((b - a) / 6) * (fa + 4 * fm + fb);
+}
+
+function adaptiveSimpsonRecursive(
+	evaluate: (x: number) => number | null,
+	a: number,
+	b: number,
+	fa: number,
+	fm: number,
+	fb: number,
+	whole: number,
+	depth: number
+): number | null {
+	const midpoint = (a + b) / 2;
+	const leftMidpoint = (a + midpoint) / 2;
+	const rightMidpoint = (midpoint + b) / 2;
+	const fLeftMidpoint = evaluate(leftMidpoint);
+	const fRightMidpoint = evaluate(rightMidpoint);
+
+	if (
+		fLeftMidpoint === null ||
+		fRightMidpoint === null ||
+		!Number.isFinite(fLeftMidpoint) ||
+		!Number.isFinite(fRightMidpoint)
+	) {
+		return null;
+	}
+
+	const left = simpsonEstimate(a, midpoint, fa, fLeftMidpoint, fm);
+	const right = simpsonEstimate(midpoint, b, fm, fRightMidpoint, fb);
+	const refined = left + right;
+
+	if (depth <= 0 || Math.abs(refined - whole) < 1e-6 * Math.max(1, Math.abs(refined))) {
+		return refined + (refined - whole) / 15;
+	}
+
+	const leftIntegral = adaptiveSimpsonRecursive(
+		evaluate,
+		a,
+		midpoint,
+		fa,
+		fLeftMidpoint,
+		fm,
+		left,
+		depth - 1
+	);
+	const rightIntegral = adaptiveSimpsonRecursive(
+		evaluate,
+		midpoint,
+		b,
+		fm,
+		fRightMidpoint,
+		fb,
+		right,
+		depth - 1
+	);
+
+	if (leftIntegral === null || rightIntegral === null) {
+		return null;
+	}
+
+	return leftIntegral + rightIntegral;
+}
+
+function adaptiveSimpsonIntegral(
+	evaluate: (x: number) => number | null,
+	a: number,
+	b: number,
+	depth = 10
+): number | null {
+	const fa = evaluate(a);
+	const fb = evaluate(b);
+	const midpoint = (a + b) / 2;
+	const fm = evaluate(midpoint);
+
+	if (
+		fa === null ||
+		fb === null ||
+		fm === null ||
+		!Number.isFinite(fa) ||
+		!Number.isFinite(fb) ||
+		!Number.isFinite(fm)
+	) {
+		return null;
+	}
+
+	return adaptiveSimpsonRecursive(
+		evaluate,
+		a,
+		b,
+		fa,
+		fm,
+		fb,
+		simpsonEstimate(a, b, fa, fm, fb),
+		depth
+	);
+}
+
+function integrateVisibleFiniteIntervals(
+	evaluate: (x: number) => number | null,
+	xMin: number,
+	xMax: number
+): { value: number; coverage: number } | null {
+	const probes = 96;
+	const step = (xMax - xMin) / probes;
+	let total = 0;
+	let coveredWidth = 0;
+
+	for (let index = 0; index < probes; index += 1) {
+		const a = xMin + step * index;
+		const b = a + step;
+		const midpoint = (a + b) / 2;
+		const fa = evaluate(a);
+		const fb = evaluate(b);
+		const fm = evaluate(midpoint);
+
+		if (
+			fa === null ||
+			fb === null ||
+			fm === null ||
+			!Number.isFinite(fa) ||
+			!Number.isFinite(fb) ||
+			!Number.isFinite(fm)
+		) {
+			continue;
+		}
+
+		const integral =
+			adaptiveSimpsonIntegral(evaluate, a, b, 8) ?? simpsonIntegral(evaluate, a, b, 12);
+
+		if (integral === null || !Number.isFinite(integral)) {
+			continue;
+		}
+
+		total += integral;
+		coveredWidth += b - a;
+	}
+
+	if (coveredWidth <= 0) {
+		return null;
+	}
+
+	return {
+		value: total,
+		coverage: coveredWidth / Math.max(1e-6, xMax - xMin)
+	};
+}
+
+function symbolicPrimitive(
+	node: MathNode | null
+): { display: string; expression: string | null } | null {
+	const source = node?.toString() ?? '';
 
 	if (/^sin\(x\)$/.test(source)) {
 		return { display: '-cos(x) + C', expression: '-cos(x)' };
@@ -408,9 +541,23 @@ function integralSummary(input: EquationAnalysisInput): {
 		return { display: '(x^2) / 2 + C', expression: '(x^2) / 2' };
 	}
 
-	const area = simpsonIntegral(input.evaluate, xMin, xMax);
+	return null;
+}
 
-	if (area === null) {
+function integralSummary(input: EquationAnalysisInput): {
+	display: string;
+	expression: string | null;
+} {
+	const { xMin, xMax } = viewportBounds(input.viewport);
+	const symbolic = symbolicPrimitive(input.node);
+
+	if (symbolic) {
+		return symbolic;
+	}
+
+	const area = integrateVisibleFiniteIntervals(input.evaluate, xMin, xMax);
+
+	if (!area) {
 		return {
 			display: `Numerical integral unavailable on [${formatSig(xMin)}, ${formatSig(xMax)}]`,
 			expression: null
@@ -418,8 +565,38 @@ function integralSummary(input: EquationAnalysisInput): {
 	}
 
 	return {
-		display: `∫[${formatSig(xMin)}, ${formatSig(xMax)}] f(x) dx ≈ ${formatSig(area, 5)} (Simpson)`,
+		display:
+			area.coverage >= 0.98
+				? `∫[${formatSig(xMin)}, ${formatSig(xMax)}] f(x) dx ≈ ${formatSig(area.value, 5)}`
+				: `∫ over finite visible intervals ≈ ${formatSig(area.value, 5)} (${Math.round(area.coverage * 100)}% coverage)`,
 		expression: null
+	};
+}
+
+export function createPartialEquationAnalysis(
+	viewport: EquationAnalysisInput['viewport'],
+	criticalPoints: CriticalPoint[]
+): EquationAnalysis {
+	const { xMin, xMax } = viewportBounds(viewport);
+
+	return {
+		partial: true,
+		domain: 'Computing…',
+		range: 'Computing…',
+		zeros: criticalPoints.filter((point) => point.kind === 'root').map((point) => point.x),
+		period: null,
+		isEven: null,
+		isOdd: null,
+		verticalAsymptotes: [],
+		horizontalAsymptotes: { left: null, right: null },
+		criticalPoints,
+		derivative: `Computing derivative over [${formatSig(xMin)}, ${formatSig(xMax)}]…`,
+		derivativeExpression: null,
+		integral: `Computing integral over [${formatSig(xMin)}, ${formatSig(xMax)}]…`,
+		integralExpression: null,
+		isMonotone: false,
+		isContinuous: false,
+		curvature: 'Computing…'
 	};
 }
 
@@ -473,6 +650,7 @@ export function analyzeEquation(input: EquationAnalysisInput): EquationAnalysis 
 	}
 
 	return {
+		partial: false,
 		domain,
 		range,
 		zeros,

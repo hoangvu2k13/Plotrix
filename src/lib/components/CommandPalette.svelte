@@ -330,6 +330,7 @@
 	}
 
 	.group-label {
+		margin-top: var(--space-3);
 		padding: 0 var(--space-2);
 		color: var(--color-text-muted);
 		font-size: var(--text-xs);

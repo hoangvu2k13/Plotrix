@@ -1,4 +1,5 @@
 import type { EquationKind, ParametricNodes } from '$lib/math/engine';
+import { bisect } from '$utils/math';
 
 export interface IntersectionPoint {
 	x: number;
@@ -34,11 +35,26 @@ interface SampledPoint {
 	t: number;
 }
 
-const ROOT_ITERATIONS = 40;
 const MAX_TOTAL = 20;
 
-function formatSig(value: number): string {
-	return Number.isFinite(value) ? value.toPrecision(3) : 'NaN';
+function formatIntersectionValue(value: number, span: number): string {
+	if (!Number.isFinite(value)) {
+		return 'NaN';
+	}
+
+	if (Math.abs(value) < 10_000) {
+		return value.toPrecision(4);
+	}
+
+	const decimals = Math.max(0, Math.min(4, 3 - Math.floor(Math.log10(Math.max(span, 1)))));
+	return value.toFixed(decimals);
+}
+
+function formatIntersectionLabel(x: number, y: number, viewport: IntersectionViewport): string {
+	const range = visibleRange(viewport);
+	const xSpan = Math.max(1, range.xMax - range.xMin);
+	const ySpan = Math.max(1, viewport.height / Math.max(viewport.scaleY, 1e-6));
+	return `(${formatIntersectionValue(x, xSpan)}, ${formatIntersectionValue(y, ySpan)})`;
 }
 
 function visibleRange(viewport: IntersectionViewport) {
@@ -46,40 +62,6 @@ function visibleRange(viewport: IntersectionViewport) {
 		xMin: (0 - viewport.originX) / viewport.scaleX,
 		xMax: (viewport.width - viewport.originX) / viewport.scaleX
 	};
-}
-
-function bisect(
-	evaluate: (x: number) => number | null,
-	left: number,
-	right: number
-): number | null {
-	let a = left;
-	let b = right;
-	let fa = evaluate(a);
-	let fb = evaluate(b);
-
-	if (fa === null || fb === null) {
-		return null;
-	}
-
-	for (let iteration = 0; iteration < ROOT_ITERATIONS; iteration += 1) {
-		const mid = (a + b) / 2;
-		const fm = evaluate(mid);
-
-		if (fm === null) {
-			return null;
-		}
-
-		if (Math.sign(fa) === Math.sign(fm)) {
-			a = mid;
-			fa = fm;
-		} else {
-			b = mid;
-			fb = fm;
-		}
-	}
-
-	return (a + b) / 2;
 }
 
 function dedupe(points: IntersectionPoint[]): IntersectionPoint[] {
@@ -269,6 +251,36 @@ function findCartesianIntersections(
 	const sampleCount = 1000;
 	const step = (range.xMax - range.xMin) / (sampleCount - 1);
 	const points: IntersectionPoint[] = [];
+	let minLeft = Number.POSITIVE_INFINITY;
+	let maxLeft = Number.NEGATIVE_INFINITY;
+	let minRight = Number.POSITIVE_INFINITY;
+	let maxRight = Number.NEGATIVE_INFINITY;
+
+	for (let index = 0; index < sampleCount; index += 1) {
+		const x = range.xMin + step * index;
+		const leftY = left.evaluate(x);
+		const rightY = right.evaluate(x);
+
+		if (leftY !== null) {
+			minLeft = Math.min(minLeft, leftY);
+			maxLeft = Math.max(maxLeft, leftY);
+		}
+
+		if (rightY !== null) {
+			minRight = Math.min(minRight, rightY);
+			maxRight = Math.max(maxRight, rightY);
+		}
+	}
+
+	if (
+		Number.isFinite(minLeft) &&
+		Number.isFinite(maxLeft) &&
+		Number.isFinite(minRight) &&
+		Number.isFinite(maxRight) &&
+		(minLeft > maxRight || maxLeft < minRight)
+	) {
+		return [];
+	}
 
 	for (let index = 1; index < sampleCount && points.length < MAX_TOTAL; index += 1) {
 		const x0 = range.xMin + step * (index - 1);
@@ -312,7 +324,7 @@ function findCartesianIntersections(
 			y,
 			eqAId: left.id,
 			eqBId: right.id,
-			label: `(${formatSig(x)}, ${formatSig(y)})`
+			label: formatIntersectionLabel(x, y, viewport)
 		});
 	}
 
@@ -376,7 +388,8 @@ function findCartesianVsParametric(
 
 function findParametricIntersections(
 	left: IntersectionEquation,
-	right: IntersectionEquation
+	right: IntersectionEquation,
+	viewport: IntersectionViewport
 ): IntersectionPoint[] {
 	if (!left.evaluateParametric || !right.evaluateParametric || !left.paramRange || !right.paramRange) {
 		return [];
@@ -414,7 +427,7 @@ function findParametricIntersections(
 			y: refined.y,
 			eqAId: left.id,
 			eqBId: right.id,
-			label: `(${formatSig(refined.x)}, ${formatSig(refined.y)})`
+			label: formatIntersectionLabel(refined.x, refined.y, viewport)
 		});
 	}
 
@@ -441,7 +454,7 @@ export function findIntersections(
 			if (left.kind === 'cartesian' && right.kind === 'cartesian') {
 				pairPoints = findCartesianIntersections(left, right, viewport);
 			} else if (left.kind === 'parametric' && right.kind === 'parametric') {
-				pairPoints = findParametricIntersections(left, right);
+				pairPoints = findParametricIntersections(left, right, viewport);
 			} else if (left.kind === 'cartesian' && right.kind === 'parametric') {
 				pairPoints = findCartesianVsParametric(left, right, viewport);
 			} else if (left.kind === 'parametric' && right.kind === 'cartesian') {

@@ -9,6 +9,7 @@
 		active = false,
 		size = 36,
 		variant = 'default',
+		touchLabel = '',
 		children
 	} = $props<{
 		label: string;
@@ -17,11 +18,14 @@
 		active?: boolean;
 		size?: number;
 		variant?: 'default' | 'ghost' | 'accent';
+		touchLabel?: string;
 		children?: Snippet;
 	}>();
 
 	let visible = $state(false);
+	let tooltipAlign = $state<'top' | 'end'>('top');
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	let root: HTMLDivElement | null = null;
 	const tooltipId = `tooltip-${nanoid()}`;
 
 	function showTooltip(): void {
@@ -31,6 +35,10 @@
 
 		if (timer) clearTimeout(timer);
 		timer = setTimeout(() => {
+			if (root && typeof window !== 'undefined') {
+				const rect = root.getBoundingClientRect();
+				tooltipAlign = rect.left > window.innerWidth * 0.7 ? 'end' : 'top';
+			}
 			visible = true;
 		}, 200);
 	}
@@ -42,6 +50,7 @@
 </script>
 
 <div
+	bind:this={root}
 	class="button-wrap"
 	role="presentation"
 	onmouseenter={showTooltip}
@@ -53,6 +62,7 @@
 		type="button"
 		class={`icon-button ${variant}`}
 		class:active
+		class:has-touch-label={Boolean(touchLabel)}
 		aria-label={label}
 		aria-describedby={visible ? tooltipId : undefined}
 		title={label}
@@ -61,9 +71,20 @@
 		onclick={onClick}
 	>
 		{@render children?.()}
+		{#if touchLabel}
+			<span class="touch-label">{touchLabel}</span>
+		{/if}
 	</button>
 
-	<div id={tooltipId} class="tooltip" class:visible role="tooltip">{label}</div>
+	<div
+		id={tooltipId}
+		class="tooltip"
+		class:visible
+		class:align-end={tooltipAlign === 'end'}
+		role="tooltip"
+	>
+		{label}
+	</div>
 </div>
 
 <style>
@@ -82,6 +103,19 @@
 		background: transparent;
 		color: var(--color-text-secondary);
 		cursor: pointer;
+		transition:
+			background-color var(--duration-fast) var(--ease-default),
+			border-color var(--duration-fast) var(--ease-default),
+			color var(--duration-fast) var(--ease-default),
+			box-shadow var(--duration-fast) var(--ease-default),
+			transform var(--duration-fast) var(--ease-default);
+	}
+
+	.icon-button.has-touch-label {
+		width: auto;
+		padding: 0 var(--space-3);
+		grid-auto-flow: column;
+		gap: var(--space-2);
 	}
 
 	.icon-button :global(.icon) {
@@ -103,9 +137,12 @@
 		color: var(--color-accent);
 	}
 
-	.icon-button:hover {
-		background: var(--color-bg-overlay);
-		color: var(--color-text-primary);
+	@media (hover: hover) and (pointer: fine) {
+		.icon-button:hover:not(:disabled) {
+			background: var(--color-bg-overlay);
+			color: var(--color-text-primary);
+			transform: translateY(-1px);
+		}
 	}
 
 	.icon-button.active {
@@ -142,5 +179,32 @@
 	.tooltip.visible {
 		opacity: 1;
 		transform: translateX(-50%) translateY(0);
+	}
+
+	.tooltip.align-end {
+		left: auto;
+		right: 0;
+		bottom: calc(100% + 8px);
+		transform: translateY(4px);
+	}
+
+	.tooltip.align-end.visible {
+		transform: translateY(0);
+	}
+
+	.touch-label {
+		display: none;
+		font-size: var(--text-sm);
+		font-weight: var(--font-weight-medium);
+	}
+
+	@media (max-width: 960px) {
+		.icon-button.has-touch-label {
+			min-width: 36px;
+		}
+
+		.touch-label {
+			display: inline;
+		}
 	}
 </style>

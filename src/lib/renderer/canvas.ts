@@ -1,13 +1,12 @@
 import {
-	evaluateCartesianAt,
 	evaluateImplicitAt,
 	evaluateInequalityBoundaryAt,
 	evaluatePolarAt,
-	sampleEquation,
-	type EquationKind
+	sampleEquation
 } from '$lib/math/engine';
 import type { CriticalPoint } from '$lib/analysis/criticalPoints';
 import type { IntersectionPoint } from '$lib/analysis/intersections';
+import { LruMap } from '$lib/utils/lru';
 import type { DataSeries, GraphState, PlotEquation } from '$stores/graph.svelte';
 import type { UiState } from '$stores/ui.svelte';
 import { clamp, formatCoordinate, formatSig } from '$utils/format';
@@ -34,6 +33,19 @@ interface ThemeTokens {
 
 type CacheLayer = HTMLCanvasElement | OffscreenCanvas;
 type CanvasPoint = [number, number];
+type MarkerKind = 'critical' | 'intersection' | 'trace';
+
+export interface CanvasMarker {
+	kind: MarkerKind;
+	x: number;
+	y: number;
+	canvasX: number;
+	canvasY: number;
+	radius: number;
+	label: string;
+	equationId?: string;
+	color: string;
+}
 
 interface ScalarField {
 	values: Float64Array;
@@ -45,10 +57,15 @@ interface ScalarField {
 
 const ISO_EPSILON = 1e-9;
 const CACHE_MEMORY_LIMIT = 96 * 1024 * 1024;
+const AXIS_NUMBER_FORMAT = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+const TEXT_MEASURE_CACHE = new LruMap<string, number>(200);
 
 class MemoryBoundCanvasCache {
 	private entries = new Map<string, { layer: CacheLayer; bytes: number }>();
 	private totalBytes = 0;
+	private dirty = false;
+	private evictionScheduled = false;
+	private pendingEvicted: CacheLayer[] = [];
 
 	get(key: string): CacheLayer | undefined {
 		const entry = this.entries.get(key);
@@ -75,7 +92,42 @@ class MemoryBoundCanvasCache {
 
 		this.entries.set(key, { layer, bytes });
 		this.totalBytes += bytes;
+		this.dirty = true;
+		this.scheduleEviction();
 
+		if (this.pendingEvicted.length) {
+			evicted.push(...this.pendingEvicted.splice(0, this.pendingEvicted.length));
+		}
+
+		return evicted;
+	}
+
+	flushEvicted(): CacheLayer[] {
+		if (!this.pendingEvicted.length) {
+			return [];
+		}
+
+		return this.pendingEvicted.splice(0, this.pendingEvicted.length);
+	}
+
+	private scheduleEviction(): void {
+		if (this.evictionScheduled || !this.dirty) {
+			return;
+		}
+
+		this.evictionScheduled = true;
+		queueMicrotask(() => {
+			this.evictionScheduled = false;
+			this.evict();
+		});
+	}
+
+	private evict(): void {
+		if (!this.dirty) {
+			return;
+		}
+
+		this.dirty = false;
 		while (this.totalBytes > CACHE_MEMORY_LIMIT && this.entries.size > 1) {
 			const oldest = this.entries.keys().next().value;
 
@@ -87,18 +139,19 @@ class MemoryBoundCanvasCache {
 
 			if (entry) {
 				this.totalBytes -= entry.bytes;
-				evicted.push(entry.layer);
+				this.pendingEvicted.push(entry.layer);
 			}
 
 			this.entries.delete(oldest);
 		}
-
-		return evicted;
 	}
 
 	clear(): void {
 		this.entries.clear();
 		this.totalBytes = 0;
+		this.pendingEvicted = [];
+		this.dirty = false;
+		this.evictionScheduled = false;
 	}
 }
 
@@ -108,10 +161,27 @@ function formatAxisLabel(v: number, step: number): string {
 		return v.toExponential(1);
 	}
 	if (Math.abs(v) >= 1e4) {
-		return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(v);
+		return AXIS_NUMBER_FORMAT.format(v);
 	}
 	const decimals = Math.max(0, -Math.floor(Math.log10(step)));
 	return v.toFixed(Math.min(decimals, 4));
+}
+
+function measureTextWidth(
+	ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+	label: string
+): number {
+	const font = 'font' in ctx ? ctx.font : '';
+	const cacheKey = `${font}:${label}`;
+	const cached = TEXT_MEASURE_CACHE.get(cacheKey);
+
+	if (cached !== undefined) {
+		return cached;
+	}
+
+	const measured = ctx.measureText(label).width;
+	TEXT_MEASURE_CACHE.set(cacheKey, measured);
+	return measured;
 }
 
 function niceStep(units: number): number {
@@ -138,8 +208,9 @@ function clipLineToRect(
 	left: number,
 	top: number,
 	right: number,
-	bottom: number
-): [number, number, number, number] | null {
+	bottom: number,
+	output: [number, number, number, number]
+): boolean {
 	const INSIDE = 0;
 	const LEFT = 1;
 	const RIGHT = 2;
@@ -164,11 +235,15 @@ function clipLineToRect(
 
 	while (true) {
 		if (!(startCode | endCode)) {
-			return [startX, startY, endX, endY];
+			output[0] = startX;
+			output[1] = startY;
+			output[2] = endX;
+			output[3] = endY;
+			return true;
 		}
 
 		if (startCode & endCode) {
-			return null;
+			return false;
 		}
 
 		const code = startCode || endCode;
@@ -287,8 +362,29 @@ export class CanvasRenderer {
 	private shadingCache = new MemoryBoundCanvasCache();
 	private inequalitySystemCache = new MemoryBoundCanvasCache();
 	private polarCache = new MemoryBoundCanvasCache();
+	private curveGeometryCache = new LruMap<string, Float64Array[]>(180);
 	private curveBudgetCache = new Map<string, { baseSamples: number; maxSamples: number }>();
 	private cacheLayerPool = new Map<string, CacheLayer[]>();
+	private clipBuffer: [number, number, number, number] = [0, 0, 0, 0];
+	private lastViewportBucketSignature = '';
+	private lastViewportBucket = '';
+	private interactiveMarkers: CanvasMarker[] = [];
+
+	getMarkerAtCanvasPoint(x: number, y: number): CanvasMarker | null {
+		for (let index = this.interactiveMarkers.length - 1; index >= 0; index -= 1) {
+			const marker = this.interactiveMarkers[index]!;
+
+			if (Math.hypot(marker.canvasX - x, marker.canvasY - y) <= marker.radius) {
+				return marker;
+			}
+		}
+
+		return null;
+	}
+
+	private registerMarker(marker: CanvasMarker): void {
+		this.interactiveMarkers.push(marker);
+	}
 
 	private setCanvasCacheEntry(cache: MemoryBoundCanvasCache, key: string, layer: CacheLayer): void {
 		const evicted = cache.set(key, layer);
@@ -296,6 +392,19 @@ export class CanvasRenderer {
 		for (const entry of evicted) {
 			if (entry !== layer) {
 				this.releaseCacheLayer(entry);
+			}
+		}
+	}
+
+	private flushCacheEvictions(): void {
+		for (const cache of [
+			this.scatterCache,
+			this.shadingCache,
+			this.inequalitySystemCache,
+			this.polarCache
+		]) {
+			for (const layer of cache.flushEvicted()) {
+				this.releaseCacheLayer(layer);
 			}
 		}
 	}
@@ -407,6 +516,7 @@ export class CanvasRenderer {
 		this.shadingCache.clear();
 		this.inequalitySystemCache.clear();
 		this.polarCache.clear();
+		this.curveGeometryCache.clear();
 		this.curveBudgetCache.clear();
 		this.state.setViewportSize(width, height);
 		this.render(true);
@@ -544,12 +654,18 @@ export class CanvasRenderer {
 					})
 			)
 			.join('');
+		const mathViewbox = `${range.xMin.toFixed(4)} ${range.yMin.toFixed(4)} ${(
+			range.xMax - range.xMin
+		).toFixed(4)} ${(range.yMax - range.yMin).toFixed(4)}`;
 
 		return [
 			`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none">`,
 			`<rect width="${width}" height="${height}" fill="${this.state.settings.backgroundColor ?? tokens.canvas}" />`,
+			`<!-- Plotrix math viewbox: ${mathViewbox} -->`,
+			`<g data-viewbox="${mathViewbox}">`,
 			paths,
 			scatter,
+			'</g>',
 			`<text x="${width - 20}" y="${height - 18}" font-family="${tokens.fontSans}" font-size="12" fill="${tokens.text}" fill-opacity="0.15" text-anchor="end">Plotrix</text>`,
 			'</svg>'
 		].join('');
@@ -560,43 +676,64 @@ export class CanvasRenderer {
 		surface.ctx.clearRect(0, 0, surface.width, surface.height);
 		surface.ctx.imageSmoothingEnabled = this.state.settings.antialiasing;
 		this.syncTokenCache();
+		this.flushCacheEvictions();
+		this.interactiveMarkers = [];
+		const tokens = this.readTokens();
 		const viewportKey = this.viewportBucket();
-		this.drawBackground(surface);
+		this.drawBackground(surface, tokens);
 
 		if (this.state.settings.gridVisible) {
 			if (
 				this.state.settings.gridStyle === 'polar' &&
 				this.state.equations.some((equation) => equation.visible && equation.kind === 'polar')
 			) {
-				this.drawPolarGrid(surface);
+				this.drawPolarGrid(surface, tokens);
 			} else {
-				if (this.state.settings.minorGridVisible) this.drawMinorGrid(surface);
-				this.drawMajorGrid(surface);
+				if (this.state.settings.minorGridVisible) this.drawMinorGrid(surface, tokens);
+				this.drawMajorGrid(surface, tokens);
 			}
 		}
 
-		this.drawAxes(surface);
-		if (this.state.settings.axisLabelsVisible) this.drawAxisLabels(surface);
+		this.drawAxes(surface, tokens);
+		if (this.state.settings.axisLabelsVisible) this.drawAxisLabels(surface, tokens);
 		this.drawInequalitySystems(surface, viewportKey);
-		this.drawEquations(surface, viewportKey);
-		this.drawScatterData(surface, viewportKey);
+		this.drawEquations(surface, viewportKey, tokens);
+		this.drawScatterData(surface, viewportKey, tokens);
 		this.drawAsymptoteHighlights(surface);
-		this.drawCriticalPointOverlays(surface);
-		this.drawIntersectionOverlays(surface);
-		if (this.state.settings.traceMode) this.drawTracePoint(surface);
-		if (this.state.settings.crosshairVisible) this.drawCrosshair(surface);
-		this.drawWatermark(surface);
+		this.drawCriticalPointOverlays(surface, tokens);
+		this.drawIntersectionOverlays(surface, tokens);
+		this.drawAnnotations(surface, tokens);
+		if (this.state.settings.traceMode) this.drawTracePoint(surface, tokens);
+		if (this.state.settings.crosshairVisible) this.drawCrosshair(surface, tokens);
+		this.drawWatermark(surface, tokens);
 	}
 
 	private viewportBucket(panThreshold = 0.01, zoomThreshold = 0.02): string {
 		const width = Math.max(1, this.surface.width);
 		const height = Math.max(1, this.surface.height);
-		return [
+		const signature = [
+			this.state.view.originX,
+			this.state.view.originY,
+			this.state.view.scaleX,
+			this.state.view.scaleY,
+			width,
+			height,
+			panThreshold,
+			zoomThreshold
+		].join(':');
+
+		if (signature === this.lastViewportBucketSignature) {
+			return this.lastViewportBucket;
+		}
+
+		this.lastViewportBucketSignature = signature;
+		this.lastViewportBucket = [
 			Math.round(this.state.view.originX / Math.max(1, width * panThreshold)),
 			Math.round(this.state.view.originY / Math.max(1, height * panThreshold)),
 			Math.round(this.state.view.scaleX / Math.max(1e-6, this.state.view.scaleX * zoomThreshold)),
 			Math.round(this.state.view.scaleY / Math.max(1e-6, this.state.view.scaleY * zoomThreshold))
 		].join(':');
+		return this.lastViewportBucket;
 	}
 
 	private syncTokenCache(): void {
@@ -920,26 +1057,24 @@ export class CanvasRenderer {
 		ctx.fill();
 	}
 
-	private drawBackground(surface: SurfaceContext): void {
-		const tokens = this.readTokens();
+	private drawBackground(surface: SurfaceContext, tokens: ThemeTokens): void {
 		surface.ctx.fillStyle = tokens.canvas;
 		surface.ctx.fillRect(0, 0, surface.width, surface.height);
 	}
 
-	private drawMinorGrid(surface: SurfaceContext): void {
+	private drawMinorGrid(surface: SurfaceContext, tokens: ThemeTokens): void {
 		const majorX = niceStep(90 / this.state.view.scaleX);
 		const majorY = niceStep(90 / this.state.view.scaleY);
-		this.drawGridLines(surface, majorX / 5, majorY / 5, 0.4, 1, this.readTokens().gridMinor);
+		this.drawGridLines(surface, majorX / 5, majorY / 5, 0.4, 1, tokens.gridMinor);
 	}
 
-	private drawMajorGrid(surface: SurfaceContext): void {
+	private drawMajorGrid(surface: SurfaceContext, tokens: ThemeTokens): void {
 		const majorX = niceStep(90 / this.state.view.scaleX);
 		const majorY = niceStep(90 / this.state.view.scaleY);
-		this.drawGridLines(surface, majorX, majorY, 0.8, 1.2, this.readTokens().gridMajor);
+		this.drawGridLines(surface, majorX, majorY, 0.8, 1.2, tokens.gridMajor);
 	}
 
-	private drawPolarGrid(surface: SurfaceContext): void {
-		const tokens = this.readTokens();
+	private drawPolarGrid(surface: SurfaceContext, tokens: ThemeTokens): void {
 		const { ctx, width, height } = surface;
 		const maxRadius = Math.max(
 			Math.hypot(this.state.view.originX, this.state.view.originY),
@@ -1021,8 +1156,7 @@ export class CanvasRenderer {
 		ctx.restore();
 	}
 
-	private drawAxes(surface: SurfaceContext): void {
-		const tokens = this.readTokens();
+	private drawAxes(surface: SurfaceContext, tokens: ThemeTokens): void {
 		const range = this.visibleMathRange();
 		const { ctx, width, height } = surface;
 		ctx.save();
@@ -1061,8 +1195,7 @@ export class CanvasRenderer {
 		ctx.restore();
 	}
 
-	private drawAxisLabels(surface: SurfaceContext): void {
-		const tokens = this.readTokens();
+	private drawAxisLabels(surface: SurfaceContext, tokens: ThemeTokens): void {
 		const { ctx, width, height } = surface;
 		const range = this.visibleMathRange();
 		const stepX = niceStep(90 / this.state.view.scaleX);
@@ -1119,7 +1252,7 @@ export class CanvasRenderer {
 				.map((equation) => `${equation.id}:${equation.raw}:${equation.lineStyle}`)
 				.join('|'),
 			viewportKey,
-			Object.values(this.state.variableScope()).join(':')
+			this.state.variablesHash
 		].join(':');
 		let layer = this.inequalitySystemCache.get(cacheKey);
 
@@ -1342,13 +1475,9 @@ export class CanvasRenderer {
 	): void {
 		const inequality = equation.inequality;
 		if (!inequality) return;
-		const cacheKey = [
-			equation.id,
-			equation.raw,
-			viewportKey,
-			alpha,
-			Object.values(this.state.variableScope()).join(':')
-		].join(':');
+		const cacheKey = [equation.id, equation.raw, viewportKey, alpha, this.state.variablesHash].join(
+			':'
+		);
 		let layer = this.shadingCache.get(cacheKey);
 		if (!layer) {
 			const created = this.createCacheLayer(surface.width, surface.height, surface.dpr);
@@ -1365,7 +1494,7 @@ export class CanvasRenderer {
 		surface.ctx.drawImage(layer, 0, 0, surface.width, surface.height);
 	}
 
-	private drawEquations(surface: SurfaceContext, viewportKey: string): void {
+	private drawEquations(surface: SurfaceContext, viewportKey: string, tokens: ThemeTokens): void {
 		const visibleCount = Math.max(
 			1,
 			this.state.equations.filter(
@@ -1375,7 +1504,7 @@ export class CanvasRenderer {
 		for (const equation of this.state.equations) {
 			if (!equation.visible || equation.errorMessage || equation.kind === 'inequality') continue;
 			const startedAt = performance.now();
-			this.drawCurve(surface, equation, visibleCount, viewportKey);
+			this.drawCurve(surface, equation, visibleCount, viewportKey, tokens);
 			this.state.setEquationRenderTime(equation.id, performance.now() - startedAt);
 		}
 	}
@@ -1384,7 +1513,8 @@ export class CanvasRenderer {
 		surface: SurfaceContext,
 		equation: PlotEquation,
 		visibleCount: number,
-		viewportKey: string
+		viewportKey: string,
+		tokens: ThemeTokens
 	): void {
 		if (equation.kind === 'polar') {
 			this.drawPolarCurve(surface, equation, viewportKey);
@@ -1411,14 +1541,29 @@ export class CanvasRenderer {
 			this.curveBudgetCache.set(budgetKey, budget);
 		}
 
-		const segments = sampleEquation(
-			equation,
-			range.xMin,
-			range.xMax,
+		const geometryCacheKey = [
+			equation.id,
+			equation.raw,
+			viewportKey,
+			this.state.variablesHash,
 			budget.baseSamples,
-			budget.maxSamples,
-			this.state.variableScope()
-		);
+			budget.maxSamples
+		].join(':');
+		const scope = this.state.variableScope();
+		const segments =
+			this.curveGeometryCache.get(geometryCacheKey) ??
+			(() => {
+				const sampled = sampleEquation(
+					equation,
+					range.xMin,
+					range.xMax,
+					budget.baseSamples,
+					budget.maxSamples,
+					scope
+				);
+				this.curveGeometryCache.set(geometryCacheKey, sampled);
+				return sampled;
+			})();
 
 		ctx.save();
 		ctx.beginPath();
@@ -1450,7 +1595,8 @@ export class CanvasRenderer {
 				equation.label || equation.raw,
 				labelX + 10,
 				labelY - 10,
-				equation.color
+				equation.color,
+				tokens
 			);
 		}
 
@@ -1463,7 +1609,8 @@ export class CanvasRenderer {
 		viewportKey: string
 	): void {
 		const { ctx } = surface;
-		const cacheKey = `${equation.id}:${equation.raw}:${viewportKey}:${Object.values(this.state.variableScope()).join(':')}`;
+		const scope = this.state.variableScope();
+		const cacheKey = `${equation.id}:${equation.raw}:${viewportKey}:${this.state.variablesHash}`;
 		let layer = this.polarCache.get(cacheKey);
 
 		if (!layer) {
@@ -1473,7 +1620,21 @@ export class CanvasRenderer {
 			if (!layerCtx) return;
 			const maxSteps = Math.min(2200, Math.max(720, Math.round(this.state.view.scaleX * 48)));
 			const start = 0;
-			const maxTheta = Math.PI * 4;
+			const baseRadius = evaluatePolarAt(
+				equation.compiledExpression ?? equation.compiled,
+				start,
+				scope
+			);
+			const closureRadius = evaluatePolarAt(
+				equation.compiledExpression ?? equation.compiled,
+				start + Math.PI * 2,
+				scope
+			);
+			const closesAtTwoPi =
+				baseRadius !== null &&
+				closureRadius !== null &&
+				Math.abs(baseRadius - closureRadius) <= Math.max(1e-4, Math.abs(baseRadius) * 0.01);
+			const maxTheta = closesAtTwoPi ? Math.PI * 2 : Math.PI * 4;
 			const step = (maxTheta - start) / maxSteps;
 			const points: Array<[number, number]> = [];
 			let startPoint: [number, number] | null = null;
@@ -1487,11 +1648,7 @@ export class CanvasRenderer {
 
 			for (let index = 0; index <= maxSteps; index += 1) {
 				const theta = start + step * index;
-				const r = evaluatePolarAt(
-					equation.compiledExpression ?? equation.compiled,
-					theta,
-					this.state.variableScope()
-				);
+				const r = evaluatePolarAt(equation.compiledExpression ?? equation.compiled, theta, scope);
 				if (r === null || Number.isNaN(r) || Math.abs(r) > 1e6) {
 					if (points.length > 1) {
 						this.drawPolyline(
@@ -1548,16 +1705,17 @@ export class CanvasRenderer {
 		ctx.restore();
 	}
 
-	private drawScatterData(surface: SurfaceContext, viewportKey: string): void {
+	private drawScatterData(surface: SurfaceContext, viewportKey: string, tokens: ThemeTokens): void {
 		for (const series of this.state.dataSeries.filter((entry) => entry.plotted && entry.visible)) {
-			this.drawScatterSeries(surface, series, viewportKey);
+			this.drawScatterSeries(surface, series, viewportKey, tokens);
 		}
 	}
 
 	private drawScatterSeries(
 		surface: SurfaceContext,
 		series: DataSeries,
-		viewportKey: string
+		viewportKey: string,
+		tokens: ThemeTokens
 	): void {
 		const cacheKey = [
 			series.id,
@@ -1612,7 +1770,8 @@ export class CanvasRenderer {
 					cy,
 					series.style.symbol,
 					series.style.size,
-					series.style.color
+					series.style.color,
+					tokens
 				);
 			}
 
@@ -1628,11 +1787,12 @@ export class CanvasRenderer {
 		y: number,
 		symbol: DataSeries['style']['symbol'],
 		size: number,
-		color: string
+		color: string,
+		tokens: ThemeTokens
 	): void {
 		ctx.save();
 		ctx.fillStyle = color;
-		ctx.strokeStyle = this.readTokens().surface;
+		ctx.strokeStyle = tokens.surface;
 		ctx.globalAlpha = 0.8;
 		ctx.lineWidth = 1;
 		ctx.beginPath();
@@ -1669,7 +1829,7 @@ export class CanvasRenderer {
 		ctx.restore();
 	}
 
-	private drawCriticalPointOverlays(surface: SurfaceContext): void {
+	private drawCriticalPointOverlays(surface: SurfaceContext, tokens: ThemeTokens): void {
 		if (!this.state.settings.showCriticalPoints) return;
 		for (const equation of this.state.equations) {
 			if (
@@ -1679,30 +1839,60 @@ export class CanvasRenderer {
 				equation.kind !== 'cartesian'
 			)
 				continue;
-			this.drawCriticalPoints(surface, this.state.getCriticalPoints(equation.id), equation.color);
+			this.drawCriticalPoints(
+				surface,
+				this.state.getCriticalPoints(equation.id),
+				equation.color,
+				tokens
+			);
 		}
 	}
 
-	private drawIntersectionOverlays(surface: SurfaceContext): void {
+	private drawIntersectionOverlays(surface: SurfaceContext, tokens: ThemeTokens): void {
 		if (!this.state.settings.showIntersections) return;
 		const intersections = this.state.getIntersections();
 		for (const point of intersections) {
 			const eqA = this.state.equations.find((equation) => equation.id === point.eqAId);
 			const eqB = this.state.equations.find((equation) => equation.id === point.eqBId);
 			if (!eqA || !eqB) continue;
-			this.drawIntersectionMarker(surface, point, blendLinearRgb(eqA.color, eqB.color));
+			this.drawIntersectionMarker(surface, point, blendLinearRgb(eqA.color, eqB.color), tokens);
 		}
 	}
 
-	drawCriticalPoints(surface: SurfaceContext, points: CriticalPoint[], color: string): void {
+	drawCriticalPoints(
+		surface: SurfaceContext,
+		points: CriticalPoint[],
+		color: string,
+		tokens: ThemeTokens
+	): void {
 		const { ctx } = surface;
-		const tokens = this.readTokens();
+		const labels: Array<{
+			text: string;
+			x: number;
+			y: number;
+			anchorX: number;
+			anchorY: number;
+			align: CanvasTextAlign;
+			priority: number;
+			color: string;
+		}> = [];
+
 		ctx.save();
-		ctx.font = `10px ${tokens.fontSans}`;
+		ctx.font = `600 10px ${tokens.fontSans}`;
 		ctx.textAlign = 'center';
 
 		for (const point of points) {
 			const [cx, cy] = this.mathToCanvas(point.x, point.y);
+			this.registerMarker({
+				kind: 'critical',
+				x: point.x,
+				y: point.y,
+				canvasX: cx,
+				canvasY: cy,
+				radius: 14,
+				label: point.label,
+				color
+			});
 			ctx.strokeStyle = color;
 			ctx.fillStyle = color;
 
@@ -1713,7 +1903,16 @@ export class CanvasRenderer {
 				ctx.fill();
 				ctx.lineWidth = 2;
 				ctx.stroke();
-				this.drawClippedText(ctx, `x = ${formatSig(point.x)}`, cx, cy + 24, tokens.muted);
+				labels.push({
+					text: `x = ${formatSig(point.x)}`,
+					x: cx,
+					y: cy + 24,
+					anchorX: cx,
+					anchorY: cy + 10,
+					align: 'center',
+					priority: 3,
+					color: tokens.muted
+				});
 			} else if (point.kind === 'localMax') {
 				ctx.beginPath();
 				ctx.moveTo(cx, cy - 8);
@@ -1725,13 +1924,16 @@ export class CanvasRenderer {
 				ctx.strokeStyle = '#ffffff';
 				ctx.lineWidth = 1;
 				ctx.stroke();
-				this.drawClippedText(
-					ctx,
-					`(${formatSig(point.x)}, ${formatSig(point.y)})`,
-					cx,
-					cy - 14,
-					tokens.text
-				);
+				labels.push({
+					text: `(${formatSig(point.x)}, ${formatSig(point.y)})`,
+					x: cx,
+					y: cy - 14,
+					anchorX: cx,
+					anchorY: cy - 10,
+					align: 'center',
+					priority: 2,
+					color: tokens.text
+				});
 			} else if (point.kind === 'localMin') {
 				ctx.beginPath();
 				ctx.moveTo(cx, cy + 8);
@@ -1743,13 +1945,16 @@ export class CanvasRenderer {
 				ctx.strokeStyle = '#ffffff';
 				ctx.lineWidth = 1;
 				ctx.stroke();
-				this.drawClippedText(
-					ctx,
-					`(${formatSig(point.x)}, ${formatSig(point.y)})`,
-					cx,
-					cy + 18,
-					tokens.text
-				);
+				labels.push({
+					text: `(${formatSig(point.x)}, ${formatSig(point.y)})`,
+					x: cx,
+					y: cy + 18,
+					anchorX: cx,
+					anchorY: cy + 10,
+					align: 'center',
+					priority: 1,
+					color: tokens.text
+				});
 			} else {
 				ctx.save();
 				ctx.translate(cx, cy);
@@ -1764,15 +1969,68 @@ export class CanvasRenderer {
 				ctx.globalAlpha = 1;
 				ctx.stroke();
 				ctx.restore();
-				this.drawClippedText(
-					ctx,
-					`x = ${formatSig(point.x)}`,
-					cx + 26,
-					cy + 4,
-					tokens.text,
-					'left'
-				);
+				labels.push({
+					text: `x = ${formatSig(point.x)}`,
+					x: cx + 26,
+					y: cy + 4,
+					anchorX: cx + 6,
+					anchorY: cy,
+					align: 'left',
+					priority: 0,
+					color: tokens.text
+				});
 			}
+		}
+
+		const occupied: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+		const lineHeight = 16;
+		const lineGap = 4;
+		labels.sort((left, right) => right.priority - left.priority);
+
+		for (const label of labels) {
+			const width = measureTextWidth(ctx, label.text);
+			const left =
+				label.align === 'center'
+					? clamp(label.x - width / 2, 8, this.surface.width - width - 8)
+					: clamp(label.x, 8, this.surface.width - width - 8);
+			let top = clamp(label.y - 10, 8, this.surface.height - lineHeight - 8);
+			let shifted = 0;
+
+			while (
+				occupied.some(
+					(rect) =>
+						left < rect.right &&
+						left + width > rect.left &&
+						top < rect.bottom &&
+						top + lineHeight > rect.top
+				)
+			) {
+				top = clamp(top + lineHeight + lineGap, 8, this.surface.height - lineHeight - 8);
+				shifted += lineHeight + lineGap;
+			}
+
+			occupied.push({ left, top, right: left + width, bottom: top + lineHeight });
+
+			if (shifted > 0) {
+				ctx.save();
+				ctx.strokeStyle = color;
+				ctx.globalAlpha = 0.45;
+				ctx.lineWidth = 1;
+				ctx.beginPath();
+				ctx.moveTo(label.anchorX, label.anchorY);
+				ctx.lineTo(left + width / 2, top + lineHeight / 2);
+				ctx.stroke();
+				ctx.restore();
+			}
+
+			this.drawClippedText(
+				ctx,
+				label.text,
+				label.align === 'center' ? left + width / 2 : left,
+				top + 11,
+				label.color,
+				label.align
+			);
 		}
 
 		ctx.restore();
@@ -1781,11 +2039,21 @@ export class CanvasRenderer {
 	private drawIntersectionMarker(
 		surface: SurfaceContext,
 		point: IntersectionPoint,
-		color: string
+		color: string,
+		tokens: ThemeTokens
 	): void {
 		const { ctx } = surface;
-		const tokens = this.readTokens();
 		const [cx, cy] = this.mathToCanvas(point.x, point.y);
+		this.registerMarker({
+			kind: 'intersection',
+			x: point.x,
+			y: point.y,
+			canvasX: cx,
+			canvasY: cy,
+			radius: 14,
+			label: point.label,
+			color
+		});
 		ctx.save();
 		ctx.strokeStyle = color;
 		ctx.lineWidth = 2;
@@ -1797,7 +2065,7 @@ export class CanvasRenderer {
 		ctx.stroke();
 
 		ctx.font = `600 10px ${tokens.fontSans}`;
-		const textWidth = ctx.measureText(point.label).width;
+		const textWidth = measureTextWidth(ctx, point.label);
 		const x = clamp(cx - textWidth / 2 - 2, 8, this.surface.width - textWidth - 12);
 		let y = clamp(cy - 26, 8, this.surface.height - 24);
 		if (x < 120 && y < 40) {
@@ -1811,6 +2079,53 @@ export class CanvasRenderer {
 		ctx.globalAlpha = 1;
 		ctx.fillStyle = tokens.text;
 		ctx.fillText(point.label, x + 4, y + 12);
+		ctx.restore();
+	}
+
+	private drawAnnotations(surface: SurfaceContext, tokens: ThemeTokens): void {
+		const { ctx } = surface;
+
+		if (!this.state.annotations.length) {
+			return;
+		}
+
+		ctx.save();
+		ctx.font = `600 11px ${tokens.fontSans}`;
+
+		for (const annotation of this.state.annotations) {
+			const [cx, cy] = this.mathToCanvas(annotation.x, annotation.y);
+			const width = measureTextWidth(ctx, annotation.text) + 18;
+			const height = 24;
+			const boxX = clamp(cx + 14, 8, this.surface.width - width - 8);
+			const boxY = clamp(cy - 30, 8, this.surface.height - height - 8);
+
+			ctx.strokeStyle = annotation.color;
+			ctx.fillStyle = annotation.color;
+			ctx.lineWidth = 1.5;
+			ctx.beginPath();
+			ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+			ctx.fill();
+
+			ctx.beginPath();
+			ctx.moveTo(cx + 4, cy - 4);
+			ctx.lineTo(boxX, boxY + height / 2);
+			ctx.stroke();
+
+			ctx.fillStyle = tokens.surface;
+			ctx.globalAlpha = 0.96;
+			ctx.beginPath();
+			ctx.roundRect(boxX, boxY, width, height, 6);
+			ctx.fill();
+
+			ctx.strokeStyle = annotation.color;
+			ctx.globalAlpha = 0.32;
+			ctx.stroke();
+
+			ctx.fillStyle = tokens.text;
+			ctx.globalAlpha = 1;
+			ctx.fillText(annotation.text, boxX + 9, boxY + 15);
+		}
+
 		ctx.restore();
 	}
 
@@ -1852,31 +2167,48 @@ export class CanvasRenderer {
 			const deltaY = Math.abs(current[1] - previous[1]);
 			const angle = Math.atan2(deltaY, Math.max(deltaX, 1e-6));
 			if (deltaX < 12 && deltaY > height * 0.9 && angle > 1.48) continue;
-			const clipped = clipLineToRect(
-				previous[0],
-				previous[1],
-				current[0],
-				current[1],
-				left,
-				top,
-				right,
-				bottom
-			);
-			if (!clipped) continue;
-			ctx.moveTo(clipped[0], clipped[1]);
-			ctx.lineTo(clipped[2], clipped[3]);
+			if (
+				!clipLineToRect(
+					previous[0],
+					previous[1],
+					current[0],
+					current[1],
+					left,
+					top,
+					right,
+					bottom,
+					this.clipBuffer
+				)
+			) {
+				continue;
+			}
+			ctx.moveTo(this.clipBuffer[0], this.clipBuffer[1]);
+			ctx.lineTo(this.clipBuffer[2], this.clipBuffer[3]);
 		}
 	}
 
-	private drawTracePoint(surface: SurfaceContext): void {
+	private drawTracePoint(surface: SurfaceContext, tokens: ThemeTokens): void {
 		if (!this.ui?.tracePoint || this.state.view.isPanning || this.state.view.isAnimating) return;
 		const equation = this.state.equations.find(
 			(entry) => entry.id === this.ui?.tracePoint?.equationId
 		);
 		const [cx, cy] = this.mathToCanvas(this.ui.tracePoint.x, this.ui.tracePoint.y);
+		this.registerMarker({
+			kind: 'trace',
+			x: this.ui.tracePoint.x,
+			y: this.ui.tracePoint.y,
+			canvasX: cx,
+			canvasY: cy,
+			radius: 14,
+			label: this.ui.tracePoint.detail
+				? `${formatCoordinate(this.ui.tracePoint.x)}, ${formatCoordinate(this.ui.tracePoint.y)} ${this.ui.tracePoint.detail}`
+				: `${formatCoordinate(this.ui.tracePoint.x)}, ${formatCoordinate(this.ui.tracePoint.y)}`,
+			equationId: this.ui.tracePoint.equationId,
+			color: equation?.color ?? tokens.accent
+		});
 		const { ctx } = surface;
 		ctx.save();
-		ctx.fillStyle = equation?.color ?? this.readTokens().accent;
+		ctx.fillStyle = equation?.color ?? tokens.accent;
 		ctx.strokeStyle = '#ffffff';
 		ctx.lineWidth = 2;
 		ctx.beginPath();
@@ -1887,18 +2219,21 @@ export class CanvasRenderer {
 			ctx,
 			cx + 14,
 			cy - 28,
-			`${formatCoordinate(this.ui.tracePoint.x)}, ${formatCoordinate(this.ui.tracePoint.y)}`,
-			equation?.color ?? this.readTokens().accent
+			this.ui.tracePoint.detail
+				? `${formatCoordinate(this.ui.tracePoint.x)}, ${formatCoordinate(this.ui.tracePoint.y)} ${this.ui.tracePoint.detail}`
+				: `${formatCoordinate(this.ui.tracePoint.x)}, ${formatCoordinate(this.ui.tracePoint.y)}`,
+			equation?.color ?? tokens.accent,
+			tokens
 		);
 		ctx.restore();
 	}
 
-	private drawCrosshair(surface: SurfaceContext): void {
+	private drawCrosshair(surface: SurfaceContext, tokens: ThemeTokens): void {
 		if (!this.pointer || this.state.view.isPanning || this.state.view.isAnimating) return;
 		const { ctx, width, height } = surface;
 		const [mx, my] = this.canvasToMath(this.pointer.x, this.pointer.y);
 		ctx.save();
-		ctx.strokeStyle = this.readTokens().accent;
+		ctx.strokeStyle = tokens.accent;
 		ctx.globalAlpha = 0.32;
 		ctx.setLineDash([4, 6]);
 		ctx.beginPath();
@@ -1911,7 +2246,9 @@ export class CanvasRenderer {
 			ctx,
 			this.pointer.x + 14,
 			this.pointer.y + 14,
-			`x ${formatCoordinate(mx)} · y ${formatCoordinate(my)}`
+			`x ${formatCoordinate(mx)} · y ${formatCoordinate(my)}`,
+			tokens.accent,
+			tokens
 		);
 		ctx.restore();
 	}
@@ -1921,13 +2258,13 @@ export class CanvasRenderer {
 		x: number,
 		y: number,
 		label: string,
-		accent = this.readTokens().accent
+		accent: string,
+		tokens: ThemeTokens
 	): void {
 		if (this.state.view.isPanning || this.state.view.isAnimating) return;
-		const tokens = this.readTokens();
 		ctx.save();
 		ctx.font = `600 12px ${tokens.fontSans}`;
-		const width = ctx.measureText(label).width + 16;
+		const width = measureTextWidth(ctx, label) + 16;
 		const height = 24;
 		const clampedX = clamp(x, 8, Math.max(8, this.surface.width - width - 8));
 		const clampedY = clamp(y, 8, Math.max(8, this.surface.height - height - 8));
@@ -1959,7 +2296,7 @@ export class CanvasRenderer {
 		ctx.save();
 		ctx.textAlign = align;
 		ctx.fillStyle = color;
-		const metrics = ctx.measureText(text).width;
+		const metrics = measureTextWidth(ctx, text);
 		const safeX =
 			align === 'center'
 				? clamp(x, 8 + metrics / 2, this.surface.width - 8 - metrics / 2)
@@ -1974,24 +2311,24 @@ export class CanvasRenderer {
 		label: string,
 		x: number,
 		y: number,
-		color: string
+		color: string,
+		tokens: ThemeTokens
 	): void {
 		ctx.save();
-		ctx.font = `600 ${this.state.settings.labelSize}px ${this.readTokens().fontSans}`;
+		ctx.font = `600 ${this.state.settings.labelSize}px ${tokens.fontSans}`;
 		ctx.globalAlpha = 0.92;
 		this.drawClippedText(ctx, label, x, y, color, 'left');
 		ctx.restore();
 	}
 
-	private drawWatermark(surface: SurfaceContext): void {
-		const tokens = this.readTokens();
+	private drawWatermark(surface: SurfaceContext, tokens: ThemeTokens): void {
 		const paddingX = 16;
 		const paddingY = 14;
 		surface.ctx.save();
 		surface.ctx.fillStyle = tokens.text;
 		surface.ctx.globalAlpha = 0.14;
 		surface.ctx.font = `600 12px ${tokens.fontSans}`;
-		const width = surface.ctx.measureText('Plotrix').width;
+		const width = measureTextWidth(surface.ctx, 'Plotrix');
 		surface.ctx.fillText('Plotrix', surface.width - width - paddingX, surface.height - paddingY);
 		surface.ctx.restore();
 	}

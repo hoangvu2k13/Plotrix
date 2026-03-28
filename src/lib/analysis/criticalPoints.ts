@@ -1,3 +1,6 @@
+import { formatSig } from '$utils/format';
+import { bisect, derivative, finiteValue, secondDerivative } from '$utils/math';
+
 export type CriticalPointKind = 'root' | 'localMin' | 'localMax' | 'inflection';
 
 export interface CriticalPoint {
@@ -16,18 +19,9 @@ export interface AnalysisViewport {
 	height?: number;
 }
 
-const H = 1e-7;
 const ROOT_TOLERANCE = 1e-6;
 const ROOT_MERGE_TOLERANCE = 1e-4;
 const MAX_MARKERS = 50;
-
-function formatSig(value: number): string {
-	return Number.isFinite(value) ? value.toPrecision(3) : 'NaN';
-}
-
-function finiteValue(value: number): number | null {
-	return Number.isFinite(value) && !Number.isNaN(value) ? value : null;
-}
 
 function visibleRange(viewport: AnalysisViewport, canvasWidth: number) {
 	const width = viewport.width ?? canvasWidth;
@@ -40,73 +34,16 @@ function visibleRange(viewport: AnalysisViewport, canvasWidth: number) {
 	};
 }
 
-function derivative(f: (x: number) => number, x: number): number | null {
-	const left = finiteValue(f(x - H));
-	const right = finiteValue(f(x + H));
-
-	if (left === null || right === null) {
-		return null;
-	}
-
-	return (right - left) / (2 * H);
-}
-
-function secondDerivative(f: (x: number) => number, x: number): number | null {
-	const left = finiteValue(f(x - H));
-	const center = finiteValue(f(x));
-	const right = finiteValue(f(x + H));
-
-	if (left === null || center === null || right === null) {
-		return null;
-	}
-
-	return (left - 2 * center + right) / (H * H);
-}
-
 function thirdDerivative(f: (x: number) => number, x: number): number | null {
-	const left = secondDerivative(f, x - H);
-	const right = secondDerivative(f, x + H);
+	const step = 1e-7;
+	const left = secondDerivative(f, x - step, step);
+	const right = secondDerivative(f, x + step, step);
 
 	if (left === null || right === null) {
 		return null;
 	}
 
-	return (right - left) / (2 * H);
-}
-
-function bisect(
-	evaluate: (x: number) => number | null,
-	left: number,
-	right: number,
-	iterations = 40
-): number | null {
-	let a = left;
-	let b = right;
-	let fa = evaluate(a);
-	let fb = evaluate(b);
-
-	if (fa === null || fb === null) {
-		return null;
-	}
-
-	for (let iteration = 0; iteration < iterations; iteration += 1) {
-		const mid = (a + b) / 2;
-		const fm = evaluate(mid);
-
-		if (fm === null) {
-			return null;
-		}
-
-		if (Math.sign(fa) === Math.sign(fm)) {
-			a = mid;
-			fa = fm;
-		} else {
-			b = mid;
-			fb = fm;
-		}
-	}
-
-	return (a + b) / 2;
+	return (right - left) / (2 * step);
 }
 
 function pushPoint(

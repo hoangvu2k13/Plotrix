@@ -1,7 +1,50 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 
 	import { EXTENDED_COLOR_PALETTE } from '$lib/constants/palette';
+
+	type PickerRegistration = {
+		root: () => HTMLDivElement | null;
+		close: () => void;
+		isOpen: () => boolean;
+	};
+
+	const openPickers = new Set<PickerRegistration>();
+	let pointerListenerAttached = false;
+
+	function handleSharedPointerDown(event: PointerEvent): void {
+		for (const picker of openPickers) {
+			const root = picker.root();
+			const target = event.target;
+
+			if (
+				picker.isOpen() &&
+				root &&
+				target instanceof Node &&
+				!root.contains(target)
+			) {
+				picker.close();
+			}
+		}
+	}
+
+	function ensureSharedPointerListener(): void {
+		if (pointerListenerAttached || typeof document === 'undefined') {
+			return;
+		}
+
+		document.addEventListener('pointerdown', handleSharedPointerDown);
+		pointerListenerAttached = true;
+	}
+
+	function maybeRemoveSharedPointerListener(): void {
+		if (!pointerListenerAttached || openPickers.size > 0 || typeof document === 'undefined') {
+			return;
+		}
+
+		document.removeEventListener('pointerdown', handleSharedPointerDown);
+		pointerListenerAttached = false;
+	}
 
 	const PRESET_COLORS = [...EXTENDED_COLOR_PALETTE];
 	const COLOR_NAMES: Record<string, string> = {
@@ -14,9 +57,7 @@
 		'#ef4444': 'Red',
 		'#ec4899': 'Pink',
 		'#8b5cf6': 'Violet',
-		'#64748b': 'Slate',
-		'#ffffff': 'White',
-		'#09090b': 'Black'
+		'#64748b': 'Slate'
 	};
 
 	let {
@@ -31,7 +72,9 @@
 
 	let open = $state(false);
 	let hexValue = $state('#6366f1');
+	let invalidHex = $state(false);
 	let root: HTMLDivElement | null = null;
+	let registration: PickerRegistration | null = null;
 
 	function normalizeHex(next: string): string {
 		const trimmed = next.trim();
@@ -46,27 +89,39 @@
 	$effect(() => {
 		value;
 		hexValue = value;
+		invalidHex = false;
 	});
 
-	function handleDocumentPointerDown(event: PointerEvent): void {
-		if (!open || !root) {
+	$effect(() => {
+		if (!registration) {
 			return;
 		}
 
-		const target = event.target;
-		if (target instanceof Node && !root.contains(target)) {
-			open = false;
+		if (open) {
+			openPickers.add(registration);
+			ensureSharedPointerListener();
+			return;
 		}
-	}
 
-	if (typeof document !== 'undefined') {
-		document.addEventListener('pointerdown', handleDocumentPointerDown);
-	}
+		openPickers.delete(registration);
+		maybeRemoveSharedPointerListener();
+	});
+
+	onMount(() => {
+		registration = {
+			root: () => root,
+			close: () => {
+				open = false;
+			},
+			isOpen: () => open
+		};
+	});
 
 	onDestroy(() => {
-		if (typeof document !== 'undefined') {
-			document.removeEventListener('pointerdown', handleDocumentPointerDown);
+		if (registration) {
+			openPickers.delete(registration);
 		}
+		maybeRemoveSharedPointerListener();
 	});
 </script>
 
@@ -107,12 +162,17 @@
 				<input
 					type="text"
 					bind:value={hexValue}
+					class:invalid={invalidHex}
 					maxlength="7"
 					spellcheck="false"
 					aria-label={`${label} hex value`}
+					oninput={() => {
+						invalidHex = !/^#?[0-9a-fA-F]{0,6}$/.test(hexValue);
+					}}
 					onblur={() => {
 						const next = normalizeHex(hexValue);
 						hexValue = next;
+						invalidHex = false;
 						onChange(next);
 					}}
 				/>
@@ -205,5 +265,9 @@
 		background: var(--color-bg-base);
 		font-family: var(--font-mono);
 		font-size: var(--text-sm);
+	}
+
+	.hex input.invalid {
+		border-color: var(--color-danger);
 	}
 </style>

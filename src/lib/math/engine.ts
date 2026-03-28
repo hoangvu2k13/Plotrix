@@ -65,7 +65,7 @@ const COMPOUND_IDENTIFIERS = [...KNOWN_IDENTIFIERS].sort(
 	(left, right) => right.length - left.length
 );
 export interface EvalFunction {
-	evaluate(scope: Record<string, number>): unknown;
+	evaluate(scope: Record<string, number> | Map<string, number>): unknown;
 }
 
 const compileCache = new WeakMap<MathNode, EvalFunction>();
@@ -265,7 +265,7 @@ function compileNode(source: ExpressionSource): EvalFunction | null {
 	return compiled;
 }
 
-function compileNativeExpression(source: string, _variables: string[] = []): EvalFunction {
+function compileNativeExpression(source: string): EvalFunction {
 	const normalized = source.trim();
 	const cacheKey = normalized;
 	const cached = nativeCompileCache.get(cacheKey);
@@ -366,15 +366,15 @@ function safeEvaluateCompiled(
 	}
 }
 
-function toSafeScope(scope: Record<string, number>): Record<string, number> {
-	const safeScope = Object.create(null) as Record<string, number>;
+function toSafeScope(scope: Record<string, number>): Map<string, number> {
+	const safeScope = new Map<string, number>();
 
 	for (const [key, value] of Object.entries(scope)) {
 		if (!SAFE_SCOPE_KEY.test(key) || BLOCKED_SCOPE_KEYS.has(key) || !Number.isFinite(value)) {
 			continue;
 		}
 
-		safeScope[key] = value;
+		safeScope.set(key, value);
 	}
 
 	return safeScope;
@@ -408,13 +408,10 @@ export function evaluateParametric(
 	t: number,
 	scope: Record<string, number> = {}
 ) {
-	try {
-		const x = toFiniteNumber(nodes.xCompiled.evaluate({ ...scope, t }));
-		const y = toFiniteNumber(nodes.yCompiled.evaluate({ ...scope, t }));
-		return x === null || y === null ? null : { x, y };
-	} catch {
-		return null;
-	}
+	const safeScope = { ...scope, t };
+	const x = safeEvaluateCompiled(nodes.xCompiled, safeScope);
+	const y = safeEvaluateCompiled(nodes.yCompiled, safeScope);
+	return x === null || y === null ? null : { x, y };
 }
 
 function pushSegment(segments: Float64Array[], points: number[]): void {
@@ -461,7 +458,15 @@ function refineCartesian(
 	}
 
 	const midpointX = (x0 + x1) / 2;
-	const midpointY = safeEvaluateCompiled(evaluator, { ...scope, x: midpointX });
+	const previousX = scope.x;
+	scope.x = midpointX;
+	const midpointY = safeEvaluateCompiled(evaluator, scope);
+
+	if (previousX === undefined) {
+		delete scope.x;
+	} else {
+		scope.x = previousX;
+	}
 
 	if (midpointY === null) {
 		points.push(x1, y1);
@@ -693,8 +698,8 @@ function parseParametric(raw: string): ParsedEquationResult {
 			parametric: {
 				xNode,
 				yNode,
-				xCompiled: compileNativeExpression(xRaw, extractFreeVariables(xRaw, xNode)),
-				yCompiled: compileNativeExpression(yRaw, extractFreeVariables(yRaw, yNode)),
+				xCompiled: compileNativeExpression(xRaw),
+				yCompiled: compileNativeExpression(yRaw),
 				xRaw,
 				yRaw
 			},
@@ -774,10 +779,7 @@ function parseInequality(raw: string): ParsedEquationResult {
 	const node = math.parse(`(${lhsRaw}) - (${rhsRaw})`);
 	return {
 		node,
-		compiledExpression: compileNativeExpression(
-			`(${lhsRaw}) - (${rhsRaw})`,
-			extractFreeVariables(`${lhsRaw}${rhsRaw}`, node)
-		),
+		compiledExpression: compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`),
 		error: null,
 		kind: 'inequality',
 		isParametric: false,
@@ -785,8 +787,8 @@ function parseInequality(raw: string): ParsedEquationResult {
 			operator: match[2] as InequalityNodes['operator'],
 			lhsNode: lhs.node,
 			rhsNode: rhs.node,
-			lhsCompiled: compileNativeExpression(lhsRaw, extractFreeVariables(lhsRaw, lhs.node)),
-			rhsCompiled: compileNativeExpression(rhsRaw, extractFreeVariables(rhsRaw, rhs.node)),
+			lhsCompiled: compileNativeExpression(lhsRaw),
+			rhsCompiled: compileNativeExpression(rhsRaw),
 			lhsRaw,
 			rhsRaw,
 			isExplicitYBoundary: lhsRaw === 'y' || rhsRaw === 'y'
@@ -842,10 +844,7 @@ function parseImplicit(raw: string): ParsedEquationResult {
 	return {
 		node: parsed.node,
 		compiledExpression: parsed.node
-			? compileNativeExpression(
-					`(${lhsRaw}) - (${rhsRaw})`,
-					extractFreeVariables(`${lhsRaw}${rhsRaw}`, parsed.node)
-				)
+			? compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`)
 			: null,
 		error: parsed.error,
 		kind: 'implicit',
@@ -920,9 +919,7 @@ export function parseEquation(raw: string, kind: EquationKind = 'cartesian'): Pa
 	const parsed = parseNode(normalized);
 	return {
 		node: parsed.node,
-		compiledExpression: parsed.node
-			? compileNativeExpression(normalized, extractFreeVariables(normalized, parsed.node))
-			: null,
+		compiledExpression: parsed.node ? compileNativeExpression(normalized) : null,
 		error: parsed.error,
 		kind,
 		isParametric: false,
@@ -952,10 +949,12 @@ export function evaluateSampled(
 	let points: number[] = [];
 	let previousX: number | null = null;
 	let previousY: number | null = null;
+	const evalScope = { ...scope } as Record<string, number>;
 
 	for (let index = 0; index < samples; index += 1) {
 		const x = xMin + step * index;
-		const y = safeEvaluateCompiled(compiled, { ...scope, [variable]: x });
+		evalScope[variable] = x;
+		const y = safeEvaluateCompiled(compiled, evalScope);
 
 		if (y === null || Math.abs(y) > 1_000_000) {
 			pushSegment(segments, points);
@@ -967,7 +966,8 @@ export function evaluateSampled(
 
 		if (previousX !== null && previousY !== null) {
 			const midpointX = (previousX + x) / 2;
-			const midpointY = safeEvaluateCompiled(compiled, { ...scope, [variable]: midpointX });
+			evalScope[variable] = midpointX;
+			const midpointY = safeEvaluateCompiled(compiled, evalScope);
 
 			if (isDiscontinuity(previousY, midpointY, y)) {
 				pushSegment(segments, points);
@@ -1013,6 +1013,7 @@ export function adaptiveSample(
 
 		const refined: number[] = [points[0]!, points[1]!];
 		const budget = { current: points.length / 2, max: maxN };
+		const refinementScope = { ...scope };
 
 		for (let index = 0; index < points.length - 2; index += 2) {
 			const perSegmentBudget = { current: 0, max: 32 };
@@ -1022,7 +1023,7 @@ export function adaptiveSample(
 				points[index + 1]!,
 				points[index + 2]!,
 				points[index + 3]!,
-				scope,
+				refinementScope,
 				0,
 				budget,
 				refined,
