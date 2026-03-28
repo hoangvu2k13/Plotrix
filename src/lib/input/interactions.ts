@@ -14,6 +14,7 @@ export class InteractionManager {
 	private wheelFrame = 0;
 	private wheelDelta = 0;
 	private wheelAnchor = { x: 0, y: 0 };
+	private sidebarSwipeStart: { x: number; y: number } | null = null;
 
 	constructor(
 		private canvas: HTMLCanvasElement,
@@ -99,7 +100,10 @@ export class InteractionManager {
 	private handleDoubleClick = (event: MouseEvent): void => {
 		this.ui.pingInteraction();
 
-		if (event.shiftKey && this.graph.equations.some((equation) => equation.visible && !equation.errorMessage)) {
+		if (
+			event.shiftKey &&
+			this.graph.equations.some((equation) => equation.visible && !equation.errorMessage)
+		) {
 			this.graph.fitAll();
 		} else {
 			const point = this.getCanvasPoint(event);
@@ -123,6 +127,17 @@ export class InteractionManager {
 		this.graph.view.isPanning = this.pointers.size === 1;
 		this.renderer.setPointerPosition(point);
 		this.ui.pingInteraction();
+		if (
+			event.pointerType === 'touch' &&
+			typeof window !== 'undefined' &&
+			window.innerWidth < 960 &&
+			!this.ui.sidebarOpen &&
+			point.x <= 28
+		) {
+			this.sidebarSwipeStart = point;
+		} else {
+			this.sidebarSwipeStart = null;
+		}
 
 		if (this.pointers.size === 2) {
 			const [first, second] = [...this.pointers.values()];
@@ -175,6 +190,18 @@ export class InteractionManager {
 			const activePoint = [...this.pointers.values()][0]!;
 			const now = performance.now();
 
+			if (this.sidebarSwipeStart) {
+				const deltaX = activePoint.x - this.sidebarSwipeStart.x;
+				const deltaY = Math.abs(activePoint.y - this.sidebarSwipeStart.y);
+
+				if (deltaX > 64 && deltaY < 36) {
+					this.ui.setSidebarOpen(true);
+					this.sidebarSwipeStart = null;
+					this.graph.view.isPanning = false;
+					return;
+				}
+			}
+
 			if (this.lastPanPoint) {
 				const dx = activePoint.x - this.lastPanPoint.x;
 				const dy = activePoint.y - this.lastPanPoint.y;
@@ -203,6 +230,7 @@ export class InteractionManager {
 			this.graph.view.isPanning = false;
 			this.lastPanPoint = null;
 			this.lastPinchDistance = 0;
+			this.sidebarSwipeStart = null;
 			this.maybeStartFling();
 			return;
 		}
@@ -291,7 +319,8 @@ export class InteractionManager {
 		const isFormField =
 			target instanceof HTMLInputElement ||
 			target instanceof HTMLTextAreaElement ||
-			target?.isContentEditable;
+			target?.isContentEditable ||
+			Boolean(target?.closest('[contenteditable="true"]'));
 
 		if (isFormField && event.key !== 'Escape') {
 			return;
@@ -299,12 +328,6 @@ export class InteractionManager {
 
 		const modifier = event.metaKey || event.ctrlKey;
 		const lower = event.key.toLowerCase();
-
-		if (modifier && lower === 'z' && event.shiftKey) {
-			event.preventDefault();
-			this.graph.redoHistory();
-			return;
-		}
 
 		if ((modifier && lower === 'y') || (modifier && lower === 'z' && event.shiftKey)) {
 			event.preventDefault();
@@ -327,7 +350,10 @@ export class InteractionManager {
 		if (modifier && event.shiftKey && lower === 'a') {
 			event.preventDefault();
 			this.ui.activeAnalysisEquationId =
-				this.ui.activeAnalysisEquationId ?? this.ui.activeEquationId ?? this.graph.equations[0]?.id ?? null;
+				this.ui.activeAnalysisEquationId ??
+				this.ui.activeEquationId ??
+				this.graph.equations[0]?.id ??
+				null;
 			return;
 		}
 
@@ -415,27 +441,6 @@ export class InteractionManager {
 				this.ui.closeModal();
 				this.ui.activeEquationId = null;
 				this.ui.activeAnalysisEquationId = null;
-				break;
-			case 'Tab':
-				if (!this.graph.equations.length) {
-					return;
-				}
-
-				event.preventDefault();
-
-				if (!this.ui.activeEquationId) {
-					this.ui.activeEquationId = this.graph.equations[0]!.id;
-					return;
-				}
-
-				{
-					const currentIndex = this.graph.equations.findIndex(
-						(equation) => equation.id === this.ui.activeEquationId
-					);
-					const nextIndex = (currentIndex + 1) % this.graph.equations.length;
-					this.ui.activeEquationId = this.graph.equations[nextIndex]!.id;
-				}
-
 				break;
 			default:
 				break;

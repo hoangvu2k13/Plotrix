@@ -1,8 +1,26 @@
+<script lang="ts" module>
+	import { LruMap } from '$lib/utils/lru';
+
+	const sharedKatexCache = new LruMap<string, string>(200);
+</script>
+
 <script lang="ts">
+	import {
+		AlertTriangle,
+		BarChart2,
+		ChevronDown,
+		Copy,
+		Crosshair,
+		Eye,
+		EyeOff,
+		GripVertical,
+		Trash2
+	} from '@lucide/svelte';
 	import katex from 'katex';
 
 	import ExpressionEditor from '$components/ExpressionEditor.svelte';
 	import ColorPicker from '$components/ColorPicker.svelte';
+	import Icon from '$components/Icon.svelte';
 	import Slider from '$components/Slider.svelte';
 	import Select from '$components/Select.svelte';
 	import Toggle from '$components/Toggle.svelte';
@@ -87,7 +105,7 @@
 		const target = event.target;
 		if (
 			!(target instanceof HTMLElement) ||
-			!target.closest('.summary-row') ||
+			!target.closest('.drag-handle') ||
 			target.closest('button,input,select,label')
 		) {
 			event.preventDefault();
@@ -124,10 +142,6 @@
 	}
 </script>
 
-<script lang="ts" module>
-	const sharedKatexCache = new Map<string, string>();
-</script>
-
 <article
 	class:active
 	class:expanded
@@ -140,6 +154,10 @@
 	onfocusin={() => setActive()}
 >
 	<div class="summary-row">
+		<button type="button" class="drag-handle" aria-label="Drag to reorder equation">
+			<Icon icon={GripVertical} size="var(--icon-lg)" class="summary-icon" />
+		</button>
+
 		<button
 			type="button"
 			class="visibility"
@@ -149,28 +167,7 @@
 				graph.updateEquation(equation.id, { visible: !equation.visible });
 			}}
 		>
-			<svg viewBox="0 0 24 24" aria-hidden="true">
-				{#if equation.visible}
-					<path
-						d="M2.25 12S5.75 5.25 12 5.25 21.75 12 21.75 12 18.25 18.75 12 18.75 2.25 12 2.25 12Z"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.7"
-					/>
-					<circle cx="12" cy="12" r="3.25" fill="none" stroke="currentColor" stroke-width="1.7" />
-				{:else}
-					<path
-						d="M3 3 21 21M10.72 5.35C11.13 5.29 11.56 5.25 12 5.25 18.25 5.25 21.75 12 21.75 12a18.9 18.9 0 0 1-3.64 4.68M6.08 6.08A18.6 18.6 0 0 0 2.25 12S5.75 18.75 12 18.75c1.53 0 2.91-.41 4.14-1.04"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.7"
-					/>
-				{/if}
-			</svg>
+			<Icon icon={equation.visible ? Eye : EyeOff} size="var(--icon-lg)" class="summary-icon" />
 		</button>
 
 		<div class="swatch" aria-label="Equation color" style={`--swatch:${equation.color};`}>
@@ -187,64 +184,22 @@
 			</div>
 			{#if equation.errorMessage}
 				<span class="warning-badge" aria-hidden="true">
-					<svg viewBox="0 0 20 20">
-						<path
-							d="M10 4.25 16 15.75H4L10 4.25Zm0 4.25v2.75m0 2.5h.01"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.6"
-						/>
-					</svg>
+					<Icon icon={AlertTriangle} size="var(--icon-sm)" class="warning-icon" />
 				</span>
 			{/if}
 		</button>
 
 		<button
 			type="button"
-			class="reorder"
-			aria-label="Move equation up"
-			disabled={index === 0}
+			class="summary-delete"
+			aria-label="Delete equation"
 			onclick={(event) => {
 				event.stopPropagation();
-				graph.reorderEquations(index, index - 1);
-				ui.announce('Equation moved up');
+				graph.removeEquation(equation.id);
+				ui.announce('Equation removed');
 			}}
 		>
-			<svg viewBox="0 0 20 20" aria-hidden="true">
-				<path
-					d="m10 6-4 4h8l-4-4Z"
-					fill="none"
-					stroke="currentColor"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="1.7"
-				/>
-			</svg>
-		</button>
-
-		<button
-			type="button"
-			class="reorder"
-			aria-label="Move equation down"
-			disabled={index === graph.equations.length - 1}
-			onclick={(event) => {
-				event.stopPropagation();
-				graph.reorderEquations(index, index + 1);
-				ui.announce('Equation moved down');
-			}}
-		>
-			<svg viewBox="0 0 20 20" aria-hidden="true">
-				<path
-					d="m10 14 4-4H6l4 4Z"
-					fill="none"
-					stroke="currentColor"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="1.7"
-				/>
-			</svg>
+			<Icon icon={Trash2} size="var(--icon-md)" class="summary-icon" />
 		</button>
 
 		<button
@@ -258,16 +213,7 @@
 				expanded = !expanded;
 			}}
 		>
-			<svg viewBox="0 0 20 20" aria-hidden="true">
-				<path
-					d="m6 8 4 4 4-4"
-					fill="none"
-					stroke="currentColor"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="1.8"
-				/>
-			</svg>
+			<Icon icon={ChevronDown} size="var(--icon-md)" class="summary-icon chevron-icon" />
 		</button>
 	</div>
 
@@ -283,6 +229,7 @@
 			<div class="editor">
 				<ExpressionEditor
 					value={equation.raw}
+					kind={equation.kind}
 					prefix={expressionPrefix(equation.kind)}
 					placeholder={equation.kind === 'polar'
 						? '2 + 2*cos(t)'
@@ -406,24 +353,7 @@
 			<div class="footer-tools">
 				<div class="tool-row">
 					<span class="tool-label">
-						<svg viewBox="0 0 20 20" aria-hidden="true">
-							<path
-								d="M10 17.25s4.75-4.68 4.75-8.1a4.75 4.75 0 1 0-9.5 0c0 3.42 4.75 8.1 4.75 8.1Z"
-								fill="none"
-								stroke="currentColor"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="1.5"
-							/>
-							<circle
-								cx="10"
-								cy="9.25"
-								r="1.75"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="1.5"
-							/>
-						</svg>
+						<Icon icon={Crosshair} size="var(--icon-md)" class="tool-icon" />
 						<span>Show markers</span>
 					</span>
 					<Toggle
@@ -441,16 +371,7 @@
 						ui.setActiveAnalysisEquationId(equation.id);
 					}}
 				>
-					<svg viewBox="0 0 20 20" aria-hidden="true">
-						<path
-							d="M4 14.5h12M5.5 12V8m4 4V5.5m4 6.5V7"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.5"
-						/>
-					</svg>
+					<Icon icon={BarChart2} size="var(--icon-md)" class="tool-icon" />
 					<span>Analyze</span>
 				</button>
 			</div>
@@ -471,38 +392,8 @@
 				ui.announce('Equation duplicated');
 			}}
 		>
-			<svg viewBox="0 0 20 20" aria-hidden="true">
-				<path
-					d="M6 6.25h8v9H6zM4 3.75h8v9"
-					fill="none"
-					stroke="currentColor"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="1.5"
-				/>
-			</svg>
+			<Icon icon={Copy} size="var(--icon-md)" class="tool-icon" />
 			Duplicate
-		</button>
-		<button
-			type="button"
-			class="ghost danger"
-			onclick={(event) => {
-				event.stopPropagation();
-				graph.removeEquation(equation.id);
-				ui.announce('Equation removed');
-			}}
-		>
-			<svg viewBox="0 0 20 20" aria-hidden="true">
-				<path
-					d="M5.5 6.5h9m-7.5 0V15m3-8.5V15m3-11.25H7.75l-.5 1.5H5.5v1.25h9V5.25h-1.75l-.5-1.5Z"
-					fill="none"
-					stroke="currentColor"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="1.5"
-				/>
-			</svg>
-			Delete
 		</button>
 	</footer>
 </article>
@@ -535,14 +426,15 @@
 
 	.summary-row {
 		display: grid;
-		grid-template-columns: 24px 10px minmax(0, 1fr) 24px 24px 28px;
+		grid-template-columns: 24px 24px 16px minmax(0, 1fr) 24px 28px;
 		align-items: center;
 		gap: var(--space-3);
 		min-height: 42px;
 	}
 
+	.drag-handle,
 	.visibility,
-	.reorder,
+	.summary-delete,
 	.chevron {
 		display: inline-grid;
 		place-items: center;
@@ -555,28 +447,30 @@
 	}
 
 	.visibility:hover,
-	.reorder:hover,
+	.summary-delete:hover,
 	.chevron:hover {
 		background: var(--color-bg-overlay);
 		color: var(--color-text-primary);
 	}
 
-	.visibility svg,
-	.reorder svg,
-	.chevron svg {
-		width: 18px;
-		height: 18px;
+	:global(.summary-icon),
+	:global(.tool-icon),
+	:global(.warning-icon) {
+		display: block;
 	}
 
-	.reorder:disabled {
-		opacity: 0.35;
-		cursor: not-allowed;
+	.drag-handle {
+		cursor: grab;
+	}
+
+	.summary-delete:hover {
+		color: var(--color-danger);
 	}
 
 	.swatch {
 		position: relative;
 		display: inline-grid;
-		width: 10px;
+		width: 16px;
 		height: 42px;
 		border-radius: var(--radius-full);
 		background: var(--swatch);
@@ -651,12 +545,11 @@
 		padding: var(--space-3);
 		border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
 		border-radius: var(--radius-xl);
-		background:
-			linear-gradient(
-				180deg,
-				color-mix(in srgb, var(--color-bg-overlay) 88%, transparent),
-				color-mix(in srgb, var(--color-bg-surface) 92%, transparent)
-			);
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--color-bg-overlay) 88%, transparent),
+			color-mix(in srgb, var(--color-bg-surface) 92%, transparent)
+		);
 	}
 
 	input[type='text'],
@@ -667,12 +560,11 @@
 		padding: var(--space-2) var(--space-3);
 		border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
 		border-radius: var(--radius-lg);
-		background:
-			linear-gradient(
-				180deg,
-				color-mix(in srgb, var(--color-bg-base) 96%, transparent),
-				color-mix(in srgb, var(--color-bg-surface) 94%, transparent)
-			);
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--color-bg-base) 96%, transparent),
+			color-mix(in srgb, var(--color-bg-surface) 94%, transparent)
+		);
 		transition:
 			border-color var(--duration-fast) var(--ease-default),
 			box-shadow var(--duration-fast) var(--ease-default),
@@ -716,11 +608,6 @@
 		gap: var(--space-2);
 	}
 
-	.tool-label svg {
-		width: 16px;
-		height: 16px;
-	}
-
 	.analyze,
 	.ghost {
 		display: inline-flex;
@@ -741,9 +628,12 @@
 		color: var(--color-accent);
 	}
 
-	.analyze svg {
-		width: 16px;
-		height: 16px;
+	:global(.chevron-icon) {
+		transition: transform var(--duration-fast) var(--ease-default);
+	}
+
+	.card.expanded :global(.chevron-icon) {
+		transform: rotate(180deg);
 	}
 
 	.card-footer {
@@ -765,24 +655,9 @@
 			color var(--duration-fast) var(--ease-default);
 	}
 
-	.ghost.danger {
-		color: var(--color-danger);
-		border-color: transparent;
-	}
-
 	.ghost:hover {
 		background: var(--color-bg-overlay);
 		color: var(--color-text-primary);
-	}
-
-	.ghost.danger:hover {
-		background: color-mix(in srgb, var(--color-danger) 8%, transparent);
-		border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
-	}
-
-	.ghost svg {
-		width: 14px;
-		height: 14px;
 	}
 
 	.error {
@@ -805,11 +680,6 @@
 		color: var(--color-danger);
 		background: color-mix(in srgb, var(--color-danger) 12%, transparent);
 		transform: translateY(-50%);
-	}
-
-	.warning-badge svg {
-		width: 14px;
-		height: 14px;
 	}
 
 	.card:has(.error) .swatch {

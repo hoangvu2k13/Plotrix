@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { X } from '@lucide/svelte';
 	import { fly } from 'svelte/transition';
 
+	import Icon from '$components/Icon.svelte';
 	import type { Toast, UiState } from '$stores/ui.svelte';
 
 	let { ui } = $props<{ ui: UiState }>();
@@ -22,7 +24,7 @@
 				<p>{toast.description}</p>
 			</div>
 			<button type="button" aria-label="Dismiss toast" onclick={() => ui.dismissToast(toast.id)}>
-				Close
+				<Icon icon={X} size="var(--icon-sm)" class="dismiss-icon" />
 			</button>
 		</div>
 	{/each}
@@ -86,10 +88,18 @@
 	}
 
 	button {
+		display: inline-grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
 		padding: var(--space-1) var(--space-2);
 		border-radius: var(--radius-full);
 		background: var(--color-bg-overlay);
 		color: var(--color-text-secondary);
 		cursor: pointer;
+	}
+
+	:global(.dismiss-icon) {
+		display: block;
 	}
 </style>

@@ -1,5 +1,8 @@
 <script lang="ts">
+	import { Plus, ScatterChart, Trash2, TrendingUp, Upload } from '@lucide/svelte';
+
 	import ColorPicker from '$components/ColorPicker.svelte';
+	import Icon from '$components/Icon.svelte';
 	import Slider from '$components/Slider.svelte';
 	import type { DataSeries, GraphState } from '$stores/graph.svelte';
 	import type { UiState } from '$stores/ui.svelte';
@@ -70,17 +73,51 @@
 		graph.updateDataSeries(series.id, { columns, rows });
 	}
 
-	function parseCsv(text: string): string[][] {
+	function deleteRow(series: DataSeries, rowIndex: number): void {
+		const rows = series.rows.filter((_, index) => index !== rowIndex);
+		while (rows.length < 20) {
+			rows.push(Array.from({ length: series.columns.length }, () => ''));
+		}
+		graph.updateDataSeries(series.id, { rows });
+	}
+
+	function resetSheet(series: DataSeries): void {
+		graph.updateDataSeries(series.id, {
+			rows: Array.from({ length: 20 }, () =>
+				Array.from({ length: series.columns.length }, () => '')
+			),
+			plotted: false
+		});
+		ui.pushToast({
+			title: 'Sheet reset',
+			description: `${series.name} was cleared and reset to a fresh grid.`,
+			tone: 'success'
+		});
+	}
+
+	function parseCsv(text: string): {
+		rows: string[][];
+		truncatedColumns: boolean;
+		truncatedRows: boolean;
+	} {
 		const rows: string[][] = [];
 		let current = '';
 		let row: string[] = [];
 		let quoted = false;
+		let truncatedColumns = false;
+		let truncatedRows = false;
 
 		for (let index = 0; index < text.length; index += 1) {
 			const char = text[index]!;
 			const next = text[index + 1];
 
 			if (char === '"' && quoted && next === '"') {
+				current += '"';
+				index += 1;
+				continue;
+			}
+
+			if (char === '\\' && quoted && next === '"') {
 				current += '"';
 				index += 1;
 				continue;
@@ -94,6 +131,8 @@
 			if (char === ',' && !quoted) {
 				if (row.length < MAX_CSV_COLUMNS) {
 					row.push(current);
+				} else {
+					truncatedColumns = true;
 				}
 				current = '';
 				continue;
@@ -103,9 +142,12 @@
 				if (char === '\r' && next === '\n') index += 1;
 				if (row.length < MAX_CSV_COLUMNS) {
 					row.push(current);
+				} else {
+					truncatedColumns = true;
 				}
 				rows.push(row.slice(0, MAX_CSV_COLUMNS));
 				if (rows.length >= MAX_CSV_ROWS) {
+					truncatedRows = true;
 					break;
 				}
 				row = [];
@@ -119,11 +161,13 @@
 		if ((current.length || row.length) && rows.length < MAX_CSV_ROWS) {
 			if (row.length < MAX_CSV_COLUMNS) {
 				row.push(current);
+			} else {
+				truncatedColumns = true;
 			}
 			rows.push(row.slice(0, MAX_CSV_COLUMNS));
 		}
 
-		return rows;
+		return { rows, truncatedColumns, truncatedRows };
 	}
 
 	function sanitizeHeader(value: string): string {
@@ -145,7 +189,8 @@
 		const input = event.currentTarget as HTMLInputElement;
 		const file = input.files?.[0];
 		if (!file || !activeSheet) return;
-		const rows = parseCsv(await file.text());
+		const parsedCsv = parseCsv(await file.text());
+		const rows = parsedCsv.rows;
 		const first = rows[0] ?? [];
 		const headerLike = first.some((cell) => Number.isNaN(Number(cell)));
 		const columns = (
@@ -165,6 +210,14 @@
 		});
 		while (values.length < 20) values.push(Array.from({ length: columns.length }, () => ''));
 		graph.updateDataSeries(activeSheet.id, { columns, rows: values });
+		if (parsedCsv.truncatedColumns || parsedCsv.truncatedRows) {
+			ui.pushToast({
+				title: 'CSV import trimmed',
+				description:
+					`${parsedCsv.truncatedRows ? 'Extra rows were ignored. ' : ''}${parsedCsv.truncatedColumns ? 'Columns beyond the first eight were ignored.' : ''}`.trim(),
+				tone: 'warning'
+			});
+		}
 		input.value = '';
 	}
 
@@ -229,15 +282,7 @@
 								onclick={() => addColumn(activeSheet)}
 								aria-label="Add column"
 							>
-								<svg viewBox="0 0 20 20" aria-hidden="true">
-									<path
-										d="M10 4.5v11M4.5 10h11"
-										fill="none"
-										stroke="currentColor"
-										stroke-linecap="round"
-										stroke-width="1.5"
-									/>
-								</svg>
+								<Icon icon={Plus} size="var(--icon-sm)" class="action-icon" />
 							</button>
 						</th>
 					</tr>
@@ -271,7 +316,16 @@
 									</div>
 								</td>
 							{/each}
-							<td></td>
+							<td class="row-actions">
+								<button
+									type="button"
+									class="tiny"
+									aria-label={`Delete row ${rowIndex + 1}`}
+									onclick={() => deleteRow(activeSheet, rowIndex)}
+								>
+									<Icon icon={Trash2} size="var(--icon-sm)" class="action-icon" />
+								</button>
+							</td>
 						</tr>
 					{/each}
 				</tbody>
@@ -341,29 +395,18 @@
 					class="primary"
 					onclick={() => graph.updateDataSeries(activeSheet.id, { plotted: true })}
 				>
-					<svg viewBox="0 0 20 20" aria-hidden="true"
-						><path
-							d="M5 13.5c.8 0 1.5-.7 1.5-1.5S5.8 10.5 5 10.5 3.5 11.2 3.5 12 4.2 13.5 5 13.5Zm5-4c.8 0 1.5-.7 1.5-1.5S10.8 6.5 10 6.5 8.5 7.2 8.5 8 9.2 9.5 10 9.5Zm5 6c.8 0 1.5-.7 1.5-1.5s-.7-1.5-1.5-1.5-1.5.7-1.5 1.5.7 1.5 1.5 1.5Z"
-							fill="currentColor"
-						/></svg
-					>
+					<Icon icon={ScatterChart} size="var(--icon-md)" class="action-icon" />
 					<span>Plot</span>
+				</button>
+				<button type="button" class="secondary" onclick={() => resetSheet(activeSheet)}>
+					<span>Reset sheet</span>
 				</button>
 				<button
 					type="button"
 					class="secondary"
 					onclick={() => graph.updateDataSeries(activeSheet.id, { plotted: false })}
 				>
-					<svg viewBox="0 0 20 20" aria-hidden="true"
-						><path
-							d="M5.5 6.5h9m-7.5 0V15m3-8.5V15m3-11.25H7.75l-.5 1.5H5.5v1.25h9V5.25h-1.75l-.5-1.5Z"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.5"
-						/></svg
-					>
+					<Icon icon={Trash2} size="var(--icon-md)" class="action-icon" />
 					<span>Clear</span>
 				</button>
 				<button
@@ -375,29 +418,11 @@
 					}}
 					disabled={extractDataset(activeSheet).length < 2}
 				>
-					<svg viewBox="0 0 20 20" aria-hidden="true"
-						><path
-							d="M3.5 14.5c3-6 5.5-7.5 13-9M4 12.75l2.5-2.5M9 9.5l2.5-2.25M14 7l2-1.5"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.5"
-						/></svg
-					>
+					<Icon icon={TrendingUp} size="var(--icon-md)" class="action-icon" />
 					<span>Fit curve</span>
 				</button>
 				<button type="button" class="secondary" onclick={() => importInput?.click()}>
-					<svg viewBox="0 0 20 20" aria-hidden="true"
-						><path
-							d="M10 3.5v8m0 0 2.75-2.75M10 11.5 7.25 8.75M4 13.75v1.75h12v-1.75"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.5"
-						/></svg
-					>
+					<Icon icon={Upload} size="var(--icon-md)" class="action-icon" />
 					<span>Import CSV</span>
 				</button>
 			</div>
@@ -419,15 +444,7 @@
 				onclick={() => (activeSheetId = graph.addDataSeries().id)}
 				aria-label="Add sheet"
 			>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="M10 4.5v11M4.5 10h11"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-width="1.5"
-					/>
-				</svg>
+				<Icon icon={Plus} size="var(--icon-md)" class="action-icon" />
 			</button>
 		</div>
 	{/if}
@@ -501,6 +518,10 @@
 		position: relative;
 	}
 
+	.add-col {
+		width: 40px;
+	}
+
 	.data-row-num {
 		position: sticky;
 		left: 0;
@@ -520,6 +541,12 @@
 		border-bottom: 1px solid rgba(var(--color-border-rgb), 0.4);
 	}
 
+	.row-actions {
+		width: 40px;
+		padding: 2px;
+		border-bottom: 1px solid rgba(var(--color-border-rgb), 0.4);
+	}
+
 	tr.odd td:not(.data-row-num) {
 		background: transparent;
 	}
@@ -534,6 +561,10 @@
 		flex-wrap: wrap;
 		gap: var(--space-3);
 		align-items: center;
+	}
+
+	:global(.action-icon) {
+		display: block;
 	}
 
 	.series-options {
@@ -595,13 +626,6 @@
 		gap: var(--space-2);
 	}
 
-	.primary svg,
-	.secondary svg,
-	.add svg,
-	.tiny svg {
-		width: 14px;
-		height: 14px;
-	}
 
 	label {
 		display: inline-flex;

@@ -29,6 +29,10 @@ export function formatDuration(ms: number): string {
 	return `${ms >= 10 ? Math.round(ms) : formatNumber(ms, 2)} ms`;
 }
 
+export function formatSig(value: number, digits = 3): string {
+	return Number.isFinite(value) ? value.toPrecision(digits) : 'NaN';
+}
+
 export function formatShortcut(shortcut: string): string {
 	const isMac = typeof navigator !== 'undefined' && navigator.platform.includes('Mac');
 	return shortcut.replace(/mod/gi, isMac ? 'Cmd' : 'Ctrl');

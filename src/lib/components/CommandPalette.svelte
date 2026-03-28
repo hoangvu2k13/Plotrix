@@ -1,9 +1,13 @@
 <script lang="ts">
+	import { Search } from '@lucide/svelte';
 	import { fade, fly } from 'svelte/transition';
+
+	import Icon from '$components/Icon.svelte';
 	import { formatShortcut } from '$utils/format';
 
 	export interface CommandAction {
 		id: string;
+		category: string;
 		title: string;
 		description: string;
 		shortcut?: string;
@@ -37,8 +41,21 @@
 		return actions.filter(
 			(action: CommandAction) =>
 				action.title.toLowerCase().includes(needle) ||
-				action.description.toLowerCase().includes(needle)
+				action.description.toLowerCase().includes(needle) ||
+				action.category.toLowerCase().includes(needle)
 		);
+	});
+
+	const grouped = $derived.by(() => {
+		const groups = new Map<string, CommandAction[]>();
+
+		for (const action of filtered) {
+			const current = groups.get(action.category) ?? [];
+			current.push(action);
+			groups.set(action.category, current);
+		}
+
+		return [...groups.entries()];
 	});
 
 	$effect(() => {
@@ -86,7 +103,9 @@
 		event.stopPropagation();
 
 		if (event.key === 'Tab') {
-			const focusable = panel?.querySelectorAll<HTMLElement>('input, button, [tabindex]:not([tabindex="-1"])');
+			const focusable = panel?.querySelectorAll<HTMLElement>(
+				'input, button, [tabindex]:not([tabindex="-1"])'
+			);
 			if (!focusable?.length) {
 				return;
 			}
@@ -95,9 +114,7 @@
 			const currentIndex = items.findIndex((element) => element === document.activeElement);
 			const direction = event.shiftKey ? -1 : 1;
 			const nextIndex =
-				currentIndex === -1
-					? 0
-					: (currentIndex + direction + items.length) % items.length;
+				currentIndex === -1 ? 0 : (currentIndex + direction + items.length) % items.length;
 			event.preventDefault();
 			items[nextIndex]?.focus();
 			return;
@@ -146,16 +163,7 @@
 		>
 			<div class="palette">
 				<label class="search-shell">
-					<svg viewBox="0 0 20 20" aria-hidden="true">
-						<path
-							d="m14.5 14.5 2.75 2.75M8.75 15a6.25 6.25 0 1 0 0-12.5 6.25 6.25 0 0 0 0 12.5Z"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.6"
-						/>
-					</svg>
+					<Icon icon={Search} size="var(--icon-md)" class="search-icon" />
 					<input
 						bind:this={input}
 						bind:value={query}
@@ -167,20 +175,25 @@
 
 				<div class="results">
 					{#if filtered.length}
-						{#each filtered as action, index (action.id)}
-							<button
-								type="button"
-								class:selected={index === selectedIndex}
-								onclick={() => execute(action)}
-							>
-								<span class="copy">
-									<strong>{action.title}</strong>
-									<small>{action.description}</small>
-								</span>
-								{#if action.shortcut}
-									<kbd>{formatShortcut(action.shortcut)}</kbd>
-								{/if}
-							</button>
+						{#each grouped as [category, items]}
+							<div class="group">
+								<p class="group-label">{category}</p>
+								{#each items as action (action.id)}
+									<button
+										type="button"
+										class:selected={filtered.indexOf(action) === selectedIndex}
+										onclick={() => execute(action)}
+									>
+										<span class="copy">
+											<strong>{action.title}</strong>
+											<small>{action.description}</small>
+										</span>
+										{#if action.shortcut}
+											<kbd>{formatShortcut(action.shortcut)}</kbd>
+										{/if}
+									</button>
+								{/each}
+							</div>
 						{/each}
 					{:else}
 						<p class="empty">No matching actions.</p>
@@ -203,6 +216,12 @@
 		backdrop-filter: blur(12px);
 	}
 
+	@supports not (backdrop-filter: blur(12px)) {
+		.backdrop {
+			background: rgba(9, 9, 11, 0.76);
+		}
+	}
+
 	.panel {
 		width: min(680px, 100%);
 		border: 1px solid color-mix(in srgb, var(--color-border) 84%, transparent);
@@ -223,12 +242,10 @@
 		display: block;
 	}
 
-	.search-shell svg {
+	:global(.search-icon) {
 		position: absolute;
 		top: 50%;
 		left: var(--space-4);
-		width: 16px;
-		height: 16px;
 		color: var(--color-text-secondary);
 		transform: translateY(-50%);
 		pointer-events: none;
@@ -305,6 +322,20 @@
 	small,
 	.empty {
 		color: var(--color-text-secondary);
+	}
+
+	.group {
+		display: grid;
+		gap: var(--space-2);
+	}
+
+	.group-label {
+		padding: 0 var(--space-2);
+		color: var(--color-text-muted);
+		font-size: var(--text-xs);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
 	}
 
 	kbd {

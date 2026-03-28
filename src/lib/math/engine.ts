@@ -1,5 +1,7 @@
 import { all, create, type MathNode } from 'mathjs';
 
+import { LruMap } from '$lib/utils/lru';
+
 const math = create(all!, {});
 
 math.import(
@@ -67,10 +69,23 @@ export interface EvalFunction {
 }
 
 const compileCache = new WeakMap<MathNode, EvalFunction>();
-const nativeCompileCache = new Map<string, EvalFunction>();
+const nativeCompileCache = new LruMap<string, EvalFunction>(200);
 const SAFE_EXPRESSION_CHARS = /^[0-9a-zA-Z\s+\-*/^().,_=<>!;πθΓ|]+$/;
 const BLOCKED_EXPRESSION_KEYWORDS =
 	/\b(?:import|require|fetch|document|window|eval|Function|prototype|__proto__|constructor|globalThis)\b/i;
+const DISALLOWED_NODE_TYPES = new Set([
+	'AccessorNode',
+	'ArrayNode',
+	'AssignmentNode',
+	'BlockNode',
+	'ConditionalNode',
+	'FunctionAssignmentNode',
+	'IndexNode',
+	'ObjectNode',
+	'RangeNode'
+]);
+const SAFE_SCOPE_KEY = /^[A-Za-z][A-Za-z0-9_]*$/;
+const BLOCKED_SCOPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export type EquationKind = 'cartesian' | 'polar' | 'parametric' | 'implicit' | 'inequality';
 export type ExpressionSource = EvalFunction | MathNode | null;
@@ -172,10 +187,7 @@ function canStartValue(token: string): boolean {
 }
 
 function normalizeImplicitMultiplication(expression: string): string {
-	const cleaned = expression
-		.replace(/\s+/g, '')
-		.replaceAll('π', 'pi')
-		.replaceAll('θ', 't');
+	const cleaned = expression.replace(/\s+/g, '').replaceAll('π', 'pi').replaceAll('θ', 't');
 	const tokens = tokenize(cleaned);
 
 	if (!tokens.length) {
@@ -262,9 +274,57 @@ function compileNativeExpression(source: string, _variables: string[] = []): Eva
 		return cached;
 	}
 
-	const compiled = math.parse(normalized).compile() as EvalFunction;
+	const node = math.parse(normalized);
+
+	if (!isSafeMathNode(node)) {
+		throw new Error('Expression contains unsupported syntax.');
+	}
+
+	const compiled = node.compile() as EvalFunction;
 	nativeCompileCache.set(cacheKey, compiled);
 	return compiled;
+}
+
+function isSafeMathNode(node: MathNode): boolean {
+	let safe = true;
+
+	node.traverse((current, path, parent) => {
+		if (!safe) {
+			return;
+		}
+
+		if (DISALLOWED_NODE_TYPES.has(current.type)) {
+			safe = false;
+			return;
+		}
+
+		if (current.type === 'FunctionNode') {
+			const fnName = String((current as unknown as { fn?: { name?: string } }).fn?.name ?? '');
+
+			if (!FUNCTION_TOKENS.includes(fnName as (typeof FUNCTION_TOKENS)[number])) {
+				safe = false;
+			}
+		}
+
+		if (current.type === 'SymbolNode') {
+			const name = String((current as unknown as { name: string }).name);
+
+			if (BLOCKED_SCOPE_KEYS.has(name)) {
+				safe = false;
+				return;
+			}
+
+			if (
+				parent?.type === 'FunctionNode' &&
+				path === 'fn' &&
+				!FUNCTION_TOKENS.includes(name as (typeof FUNCTION_TOKENS)[number])
+			) {
+				safe = false;
+			}
+		}
+	});
+
+	return safe;
 }
 
 export function toFiniteNumber(value: unknown): number | null {
@@ -300,10 +360,24 @@ function safeEvaluateCompiled(
 	scope: Record<string, number>
 ): number | null {
 	try {
-		return toFiniteNumber(compiled.evaluate(scope));
+		return toFiniteNumber(compiled.evaluate(toSafeScope(scope)));
 	} catch {
 		return null;
 	}
+}
+
+function toSafeScope(scope: Record<string, number>): Record<string, number> {
+	const safeScope = Object.create(null) as Record<string, number>;
+
+	for (const [key, value] of Object.entries(scope)) {
+		if (!SAFE_SCOPE_KEY.test(key) || BLOCKED_SCOPE_KEYS.has(key) || !Number.isFinite(value)) {
+			continue;
+		}
+
+		safeScope[key] = value;
+	}
+
+	return safeScope;
 }
 
 function evaluateWithVariable(
@@ -374,9 +448,14 @@ function refineCartesian(
 	scope: Record<string, number>,
 	depth: number,
 	budget: { current: number; max: number },
-	points: number[]
+	points: number[],
+	perSegmentBudget: { current: number; max: number }
 ): void {
-	if (depth >= 8 || budget.current >= budget.max) {
+	if (
+		depth >= 8 ||
+		budget.current >= budget.max ||
+		perSegmentBudget.current >= perSegmentBudget.max
+	) {
 		points.push(x1, y1);
 		return;
 	}
@@ -395,8 +474,31 @@ function refineCartesian(
 
 	if (normalizedError > 0.025 || Math.abs(y1 - y0) > 1.5) {
 		budget.current += 1;
-		refineCartesian(evaluator, x0, y0, midpointX, midpointY, scope, depth + 1, budget, points);
-		refineCartesian(evaluator, midpointX, midpointY, x1, y1, scope, depth + 1, budget, points);
+		perSegmentBudget.current += 1;
+		refineCartesian(
+			evaluator,
+			x0,
+			y0,
+			midpointX,
+			midpointY,
+			scope,
+			depth + 1,
+			budget,
+			points,
+			perSegmentBudget
+		);
+		refineCartesian(
+			evaluator,
+			midpointX,
+			midpointY,
+			x1,
+			y1,
+			scope,
+			depth + 1,
+			budget,
+			points,
+			perSegmentBudget
+		);
 		return;
 	}
 
@@ -445,7 +547,16 @@ function refineParametric(
 
 function parseNode(source: string): { node: MathNode | null; error: string | null } {
 	try {
-		return { node: math.parse(source), error: null };
+		const node = math.parse(source);
+
+		if (!isSafeMathNode(node)) {
+			return {
+				node: null,
+				error: 'Expression contains unsupported syntax.'
+			};
+		}
+
+		return { node, error: null };
 	} catch (error) {
 		return {
 			node: null,
@@ -479,7 +590,10 @@ function extractVariablesFromRaw(raw: string): string[] {
 	return [...new Set(matches)]
 		.map((value) => value.toLowerCase())
 		.filter(
-			(value) => value.length === 1 && !RESERVED_VARIABLES.has(value) && !FUNCTION_TOKENS.includes(value as never)
+			(value) =>
+				value.length === 1 &&
+				!RESERVED_VARIABLES.has(value) &&
+				!FUNCTION_TOKENS.includes(value as never)
 		)
 		.sort();
 }
@@ -550,8 +664,25 @@ function parseParametric(raw: string): ParsedEquationResult {
 	}
 
 	try {
-		const xNode = math.parse(xRaw);
-		const yNode = math.parse(yRaw);
+		const xParsed = parseNode(xRaw);
+		const yParsed = parseNode(yRaw);
+
+		if (!xParsed.node || !yParsed.node) {
+			return {
+				node: null,
+				compiledExpression: null,
+				error: xParsed.error ?? yParsed.error,
+				kind: 'parametric',
+				isParametric: true,
+				inequality: null,
+				parametric: null,
+				normalized: `${xRaw};${yRaw}`,
+				freeVariables: []
+			};
+		}
+
+		const xNode = xParsed.node;
+		const yNode = yParsed.node;
 		return {
 			node: null,
 			compiledExpression: null,
@@ -643,7 +774,10 @@ function parseInequality(raw: string): ParsedEquationResult {
 	const node = math.parse(`(${lhsRaw}) - (${rhsRaw})`);
 	return {
 		node,
-		compiledExpression: compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`, extractFreeVariables(`${lhsRaw}${rhsRaw}`, node)),
+		compiledExpression: compileNativeExpression(
+			`(${lhsRaw}) - (${rhsRaw})`,
+			extractFreeVariables(`${lhsRaw}${rhsRaw}`, node)
+		),
 		error: null,
 		kind: 'inequality',
 		isParametric: false,
@@ -660,7 +794,10 @@ function parseInequality(raw: string): ParsedEquationResult {
 		parametric: null,
 		normalized: `${lhsRaw}${match[2]}${rhsRaw}`,
 		freeVariables: [
-			...new Set([...extractFreeVariables(lhsRaw, lhs.node), ...extractFreeVariables(rhsRaw, rhs.node)])
+			...new Set([
+				...extractFreeVariables(lhsRaw, lhs.node),
+				...extractFreeVariables(rhsRaw, rhs.node)
+			])
 		].sort()
 	};
 }
@@ -705,7 +842,10 @@ function parseImplicit(raw: string): ParsedEquationResult {
 	return {
 		node: parsed.node,
 		compiledExpression: parsed.node
-			? compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`, extractFreeVariables(`${lhsRaw}${rhsRaw}`, parsed.node))
+			? compileNativeExpression(
+					`(${lhsRaw}) - (${rhsRaw})`,
+					extractFreeVariables(`${lhsRaw}${rhsRaw}`, parsed.node)
+				)
 			: null,
 		error: parsed.error,
 		kind: 'implicit',
@@ -780,7 +920,9 @@ export function parseEquation(raw: string, kind: EquationKind = 'cartesian'): Pa
 	const parsed = parseNode(normalized);
 	return {
 		node: parsed.node,
-		compiledExpression: parsed.node ? compileNativeExpression(normalized, extractFreeVariables(normalized, parsed.node)) : null,
+		compiledExpression: parsed.node
+			? compileNativeExpression(normalized, extractFreeVariables(normalized, parsed.node))
+			: null,
 		error: parsed.error,
 		kind,
 		isParametric: false,
@@ -873,6 +1015,7 @@ export function adaptiveSample(
 		const budget = { current: points.length / 2, max: maxN };
 
 		for (let index = 0; index < points.length - 2; index += 2) {
+			const perSegmentBudget = { current: 0, max: 32 };
 			refineCartesian(
 				compiled,
 				points[index]!,
@@ -882,7 +1025,8 @@ export function adaptiveSample(
 				scope,
 				0,
 				budget,
-				refined
+				refined,
+				perSegmentBudget
 			);
 		}
 

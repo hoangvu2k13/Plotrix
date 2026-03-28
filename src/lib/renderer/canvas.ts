@@ -10,7 +10,7 @@ import type { CriticalPoint } from '$lib/analysis/criticalPoints';
 import type { IntersectionPoint } from '$lib/analysis/intersections';
 import type { DataSeries, GraphState, PlotEquation } from '$stores/graph.svelte';
 import type { UiState } from '$stores/ui.svelte';
-import { clamp, formatCoordinate } from '$utils/format';
+import { clamp, formatCoordinate, formatSig } from '$utils/format';
 
 interface SurfaceContext {
 	ctx: CanvasRenderingContext2D;
@@ -33,6 +33,74 @@ interface ThemeTokens {
 }
 
 type CacheLayer = HTMLCanvasElement | OffscreenCanvas;
+type CanvasPoint = [number, number];
+
+interface ScalarField {
+	values: Float64Array;
+	cols: number;
+	rows: number;
+	cellWidth: number;
+	cellHeight: number;
+}
+
+const ISO_EPSILON = 1e-9;
+const CACHE_MEMORY_LIMIT = 96 * 1024 * 1024;
+
+class MemoryBoundCanvasCache {
+	private entries = new Map<string, { layer: CacheLayer; bytes: number }>();
+	private totalBytes = 0;
+
+	get(key: string): CacheLayer | undefined {
+		const entry = this.entries.get(key);
+
+		if (!entry) {
+			return undefined;
+		}
+
+		this.entries.delete(key);
+		this.entries.set(key, entry);
+		return entry.layer;
+	}
+
+	set(key: string, layer: CacheLayer): CacheLayer[] {
+		const bytes = layer.width * layer.height * 4;
+		const existing = this.entries.get(key);
+		const evicted: CacheLayer[] = [];
+
+		if (existing) {
+			this.totalBytes -= existing.bytes;
+			this.entries.delete(key);
+			evicted.push(existing.layer);
+		}
+
+		this.entries.set(key, { layer, bytes });
+		this.totalBytes += bytes;
+
+		while (this.totalBytes > CACHE_MEMORY_LIMIT && this.entries.size > 1) {
+			const oldest = this.entries.keys().next().value;
+
+			if (!oldest) {
+				break;
+			}
+
+			const entry = this.entries.get(oldest);
+
+			if (entry) {
+				this.totalBytes -= entry.bytes;
+				evicted.push(entry.layer);
+			}
+
+			this.entries.delete(oldest);
+		}
+
+		return evicted;
+	}
+
+	clear(): void {
+		this.entries.clear();
+		this.totalBytes = 0;
+	}
+}
 
 function formatAxisLabel(v: number, step: number): string {
 	if (Math.abs(v) < 1e-10) return '0';
@@ -133,13 +201,15 @@ function clipLineToRect(
 	}
 }
 
-function formatSig(value: number): string {
-	return Number.isFinite(value) ? value.toPrecision(3) : 'NaN';
-}
-
 function hexToRgb(hex: string): [number, number, number] {
 	const normalized = hex.replace('#', '');
-	const value = normalized.length === 3 ? normalized.split('').map((part) => part + part).join('') : normalized;
+	const value =
+		normalized.length === 3
+			? normalized
+					.split('')
+					.map((part) => part + part)
+					.join('')
+			: normalized;
 	const int = parseInt(value, 16);
 	return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
 }
@@ -150,9 +220,56 @@ function blendLinearRgb(left: string, right: string): string {
 	const linear = [lr, lg, lb].map((value) => (value / 255) ** 2.2);
 	const linearRight = [rr, rg, rb].map((value) => (value / 255) ** 2.2);
 	const result = linear.map((value, index) =>
-		Math.round((((value + linearRight[index]!) / 2) ** (1 / 2.2)) * 255)
+		Math.round(((value + linearRight[index]!) / 2) ** (1 / 2.2) * 255)
 	);
 	return `rgb(${result[0]}, ${result[1]}, ${result[2]})`;
+}
+
+function isFiniteScalar(value: number): boolean {
+	return Number.isFinite(value);
+}
+
+function scalarCrossesZero(a: number, b: number): boolean {
+	if (!isFiniteScalar(a) || !isFiniteScalar(b)) return false;
+	if (Math.abs(a) < ISO_EPSILON && Math.abs(b) < ISO_EPSILON) return false;
+	return (a <= 0 && b >= 0) || (a >= 0 && b <= 0);
+}
+
+function interpolateZeroPoint(
+	start: CanvasPoint,
+	end: CanvasPoint,
+	startValue: number,
+	endValue: number
+): CanvasPoint {
+	if (!isFiniteScalar(startValue) || !isFiniteScalar(endValue)) {
+		return [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2];
+	}
+
+	if (Math.abs(startValue) < ISO_EPSILON) return start;
+	if (Math.abs(endValue) < ISO_EPSILON) return end;
+
+	const delta = startValue - endValue;
+	const t = Math.abs(delta) < ISO_EPSILON ? 0.5 : clamp(startValue / delta, 0, 1);
+	return [start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t];
+}
+
+function dedupePoints(points: CanvasPoint[], tolerance = 0.35): CanvasPoint[] {
+	const unique: CanvasPoint[] = [];
+
+	for (const point of points) {
+		if (
+			unique.some(
+				(existing) =>
+					Math.abs(existing[0] - point[0]) <= tolerance &&
+					Math.abs(existing[1] - point[1]) <= tolerance
+			)
+		) {
+			continue;
+		}
+		unique.push(point);
+	}
+
+	return unique;
 }
 
 export class CanvasRenderer {
@@ -165,31 +282,83 @@ export class CanvasRenderer {
 	private surface: SurfaceContext;
 	private tokenCache: ThemeTokens | null = null;
 	private tokenSignature = '';
-	private scatterCache = new Map<string, CacheLayer>();
-	private shadingCache = new Map<string, CacheLayer>();
-	private inequalitySystemCache = new Map<string, CacheLayer>();
+	private themeObserver: MutationObserver | null = null;
+	private scatterCache = new MemoryBoundCanvasCache();
+	private shadingCache = new MemoryBoundCanvasCache();
+	private inequalitySystemCache = new MemoryBoundCanvasCache();
+	private polarCache = new MemoryBoundCanvasCache();
+	private curveBudgetCache = new Map<string, { baseSamples: number; maxSamples: number }>();
+	private cacheLayerPool = new Map<string, CacheLayer[]>();
 
-	private setCanvasCacheEntry(cache: Map<string, CacheLayer>, key: string, layer: CacheLayer): void {
-		if (cache.has(key)) {
-			cache.delete(key);
-		}
+	private setCanvasCacheEntry(cache: MemoryBoundCanvasCache, key: string, layer: CacheLayer): void {
+		const evicted = cache.set(key, layer);
 
-		cache.set(key, layer);
-
-		while (cache.size > 20) {
-			const oldest = cache.keys().next().value;
-			if (!oldest) break;
-			cache.delete(oldest);
+		for (const entry of evicted) {
+			if (entry !== layer) {
+				this.releaseCacheLayer(entry);
+			}
 		}
 	}
 
-	private createCacheLayer(width: number, height: number, dpr: number): { layer: CacheLayer; ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null } {
+	private poolKey(width: number, height: number): string {
+		return `${width}x${height}`;
+	}
+
+	private releaseCacheLayer(layer: CacheLayer): void {
+		const key = this.poolKey(layer.width, layer.height);
+		const bucket = this.cacheLayerPool.get(key) ?? [];
+
+		if (bucket.length >= 4) {
+			return;
+		}
+
+		bucket.push(layer);
+		this.cacheLayerPool.set(key, bucket);
+	}
+
+	private get2dContext(
+		layer: CacheLayer
+	): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null {
+		const ctx = layer.getContext('2d');
+
+		if (
+			ctx &&
+			'setTransform' in ctx &&
+			'clearRect' in ctx &&
+			'drawImage' in ctx &&
+			'beginPath' in ctx
+		) {
+			return ctx as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+		}
+
+		return null;
+	}
+
+	private createCacheLayer(
+		width: number,
+		height: number,
+		dpr: number
+	): {
+		layer: CacheLayer;
+		ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+	} {
 		const pixelWidth = Math.floor(width * dpr);
 		const pixelHeight = Math.floor(height * dpr);
+		const pooled = this.cacheLayerPool.get(this.poolKey(pixelWidth, pixelHeight))?.pop();
+
+		if (pooled) {
+			const ctx = this.get2dContext(pooled);
+			if (ctx) {
+				ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+				ctx.clearRect(0, 0, width, height);
+			}
+
+			return { layer: pooled, ctx };
+		}
 
 		if (typeof OffscreenCanvas !== 'undefined') {
 			const layer = new OffscreenCanvas(pixelWidth, pixelHeight);
-			const ctx = layer.getContext('2d');
+			const ctx = this.get2dContext(layer);
 			if (ctx) {
 				ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 			}
@@ -199,7 +368,7 @@ export class CanvasRenderer {
 		const layer = document.createElement('canvas');
 		layer.width = pixelWidth;
 		layer.height = pixelHeight;
-		const ctx = layer.getContext('2d');
+		const ctx = this.get2dContext(layer);
 		if (ctx) {
 			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		}
@@ -219,12 +388,15 @@ export class CanvasRenderer {
 
 		this.ctx = ctx;
 		this.surface = { ctx, width: 0, height: 0, dpr: 1 };
+		this.observeThemeChanges();
 	}
 
 	resize(width: number, height: number): void {
 		if (width <= 0 || height <= 0) return;
 		this.dpr =
-			this.state.settings.highDPI && typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+			this.state.settings.highDPI && typeof window !== 'undefined'
+				? window.devicePixelRatio || 1
+				: 1;
 		this.canvas.width = Math.floor(width * this.dpr);
 		this.canvas.height = Math.floor(height * this.dpr);
 		this.canvas.style.width = `${width}px`;
@@ -234,6 +406,8 @@ export class CanvasRenderer {
 		this.scatterCache.clear();
 		this.shadingCache.clear();
 		this.inequalitySystemCache.clear();
+		this.polarCache.clear();
+		this.curveBudgetCache.clear();
 		this.state.setViewportSize(width, height);
 		this.render(true);
 	}
@@ -244,6 +418,8 @@ export class CanvasRenderer {
 
 	destroy(): void {
 		if (this.animFrame) cancelAnimationFrame(this.animFrame);
+		this.themeObserver?.disconnect();
+		this.cacheLayerPool.clear();
 	}
 
 	setPointerPosition(point: { x: number; y: number } | null): void {
@@ -316,15 +492,64 @@ export class CanvasRenderer {
 		if (!ctx) return null;
 		ctx.setTransform(exportRatio, 0, 0, exportRatio, 0, 0);
 		this.paint({ ctx, width: this.surface.width, height: this.surface.height, dpr: exportRatio });
-		return await new Promise((resolve) => exportCanvas.toBlob((blob) => resolve(blob), 'image/png'));
+		return await new Promise((resolve) =>
+			exportCanvas.toBlob((blob) => resolve(blob), 'image/png')
+		);
 	}
 
 	toSVGString(): string {
 		const { width, height } = this.surface;
 		const tokens = this.readTokens();
+		const range = this.expandedMathRange();
+		const scope = this.state.variableScope();
+		const paths = this.state.equations
+			.filter(
+				(equation) =>
+					equation.visible &&
+					!equation.errorMessage &&
+					equation.kind !== 'implicit' &&
+					equation.kind !== 'inequality'
+			)
+			.map((equation) => {
+				const segments = sampleEquation(equation, range.xMin, range.xMax, 240, 1200, scope);
+				const d = segments
+					.map((segment) => {
+						const commands: string[] = [];
+
+						for (let index = 0; index < segment.length; index += 2) {
+							const [x, y] = this.mathToCanvas(segment[index]!, segment[index + 1]!);
+							commands.push(`${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`);
+						}
+
+						return commands.join(' ');
+					})
+					.filter(Boolean)
+					.join(' ');
+
+				return d
+					? `<path d="${d}" fill="none" stroke="${equation.color}" stroke-width="${equation.lineWidth}" stroke-linecap="round" stroke-linejoin="round" opacity="${equation.opacity}" />`
+					: '';
+			})
+			.filter(Boolean)
+			.join('');
+		const scatter = this.state.dataSeries
+			.filter((entry) => entry.plotted && entry.visible)
+			.flatMap((series) =>
+				series.rows
+					.map((row) => ({ x: Number(row[0]), y: Number(row[1]) }))
+					.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+					.map((point) => {
+						const [cx, cy] = this.mathToCanvas(point.x, point.y);
+						return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${(series.style.size / 2).toFixed(2)}" fill="${series.style.color}" fill-opacity="0.85" />`;
+					})
+			)
+			.join('');
+
 		return [
 			`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none">`,
 			`<rect width="${width}" height="${height}" fill="${this.state.settings.backgroundColor ?? tokens.canvas}" />`,
+			paths,
+			scatter,
 			`<text x="${width - 20}" y="${height - 18}" font-family="${tokens.fontSans}" font-size="12" fill="${tokens.text}" fill-opacity="0.15" text-anchor="end">Plotrix</text>`,
 			'</svg>'
 		].join('');
@@ -335,6 +560,7 @@ export class CanvasRenderer {
 		surface.ctx.clearRect(0, 0, surface.width, surface.height);
 		surface.ctx.imageSmoothingEnabled = this.state.settings.antialiasing;
 		this.syncTokenCache();
+		const viewportKey = this.viewportBucket();
 		this.drawBackground(surface);
 
 		if (this.state.settings.gridVisible) {
@@ -351,9 +577,9 @@ export class CanvasRenderer {
 
 		this.drawAxes(surface);
 		if (this.state.settings.axisLabelsVisible) this.drawAxisLabels(surface);
-		this.drawInequalitySystems(surface);
-		this.drawEquations(surface);
-		this.drawScatterData(surface);
+		this.drawInequalitySystems(surface, viewportKey);
+		this.drawEquations(surface, viewportKey);
+		this.drawScatterData(surface, viewportKey);
 		this.drawAsymptoteHighlights(surface);
 		this.drawCriticalPointOverlays(surface);
 		this.drawIntersectionOverlays(surface);
@@ -380,9 +606,25 @@ export class CanvasRenderer {
 			this.state.settings.axisColor ?? '',
 			this.state.settings.theme
 		].join(':');
-		if (signature !== this.tokenSignature || !this.tokenCache) {
+
+		if (!this.tokenCache || signature !== this.tokenSignature) {
 			this.refreshTokenCache(signature);
 		}
+	}
+
+	private observeThemeChanges(): void {
+		if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') {
+			return;
+		}
+
+		this.themeObserver = new MutationObserver(() => {
+			this.refreshTokenCache();
+			this.render();
+		});
+		this.themeObserver.observe(document.documentElement, {
+			attributes: true,
+			attributeFilter: ['data-theme', 'style']
+		});
 	}
 
 	private refreshTokenCache(signature?: string): void {
@@ -396,7 +638,9 @@ export class CanvasRenderer {
 				this.state.settings.theme
 			].join(':');
 		this.tokenCache = {
-			canvas: (this.state.settings.backgroundColor ?? styles.getPropertyValue('--color-canvas')).trim(),
+			canvas: (
+				this.state.settings.backgroundColor ?? styles.getPropertyValue('--color-canvas')
+			).trim(),
 			gridMinor: styles.getPropertyValue('--color-grid-minor').trim(),
 			gridMajor: styles.getPropertyValue('--color-grid-major').trim(),
 			axis: (this.state.settings.axisColor ?? styles.getPropertyValue('--color-axis')).trim(),
@@ -414,6 +658,266 @@ export class CanvasRenderer {
 			this.refreshTokenCache();
 		}
 		return this.tokenCache!;
+	}
+
+	private sampleScalarField(
+		surface: SurfaceContext,
+		cols: number,
+		rows: number,
+		evaluator: (x: number, y: number) => number | null
+	): ScalarField {
+		const safeCols = Math.max(1, cols);
+		const safeRows = Math.max(1, rows);
+		const cellWidth = surface.width / safeCols;
+		const cellHeight = surface.height / safeRows;
+		const stride = safeCols + 1;
+		const values = new Float64Array(stride * (safeRows + 1));
+
+		for (let row = 0; row <= safeRows; row += 1) {
+			const cy = row * cellHeight;
+			for (let col = 0; col <= safeCols; col += 1) {
+				const cx = col * cellWidth;
+				const [mx, my] = this.canvasToMath(cx, cy);
+				const value = evaluator(mx, my);
+				values[row * stride + col] = value ?? Number.NaN;
+			}
+		}
+
+		return { values, cols: safeCols, rows: safeRows, cellWidth, cellHeight };
+	}
+
+	private appendTriangleContour(
+		ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+		p0: CanvasPoint,
+		v0: number,
+		p1: CanvasPoint,
+		v1: number,
+		p2: CanvasPoint,
+		v2: number
+	): void {
+		if (!isFiniteScalar(v0) || !isFiniteScalar(v1) || !isFiniteScalar(v2)) return;
+
+		const intersections: CanvasPoint[] = [];
+		if (scalarCrossesZero(v0, v1)) intersections.push(interpolateZeroPoint(p0, p1, v0, v1));
+		if (scalarCrossesZero(v1, v2)) intersections.push(interpolateZeroPoint(p1, p2, v1, v2));
+		if (scalarCrossesZero(v2, v0)) intersections.push(interpolateZeroPoint(p2, p0, v2, v0));
+
+		const points = dedupePoints(intersections);
+		if (points.length !== 2) return;
+		const start = points[0]!;
+		const end = points[1]!;
+
+		ctx.moveTo(start[0], start[1]);
+		ctx.lineTo(end[0], end[1]);
+	}
+
+	private appendTriangleFill(
+		ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+		p0: CanvasPoint,
+		v0: number,
+		p1: CanvasPoint,
+		v1: number,
+		p2: CanvasPoint,
+		v2: number,
+		isInside: (value: number) => boolean
+	): void {
+		if (!isFiniteScalar(v0) || !isFiniteScalar(v1) || !isFiniteScalar(v2)) return;
+
+		const vertices = [
+			{ point: p0, value: v0 },
+			{ point: p1, value: v1 },
+			{ point: p2, value: v2 }
+		] as const;
+		const polygon: CanvasPoint[] = [];
+		let previous = vertices[vertices.length - 1]!;
+		let previousInside = isInside(previous.value);
+
+		for (const current of vertices) {
+			const currentInside = isInside(current.value);
+			if (previousInside !== currentInside) {
+				polygon.push(
+					interpolateZeroPoint(previous.point, current.point, previous.value, current.value)
+				);
+			}
+			if (currentInside) {
+				polygon.push(current.point);
+			}
+			previous = current;
+			previousInside = currentInside;
+		}
+
+		const points = dedupePoints(polygon);
+		if (points.length < 3) return;
+		const start = points[0]!;
+
+		ctx.moveTo(start[0], start[1]);
+		for (let index = 1; index < points.length; index += 1) {
+			ctx.lineTo(points[index]![0], points[index]![1]);
+		}
+		ctx.closePath();
+	}
+
+	private traceScalarContour(
+		ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+		field: ScalarField
+	): void {
+		const { values, cols, rows, cellWidth, cellHeight } = field;
+		const stride = cols + 1;
+
+		for (let row = 0; row < rows; row += 1) {
+			for (let col = 0; col < cols; col += 1) {
+				const topLeft = values[row * stride + col]!;
+				const topRight = values[row * stride + col + 1]!;
+				const bottomLeft = values[(row + 1) * stride + col]!;
+				const bottomRight = values[(row + 1) * stride + col + 1]!;
+
+				if (
+					!isFiniteScalar(topLeft) ||
+					!isFiniteScalar(topRight) ||
+					!isFiniteScalar(bottomLeft) ||
+					!isFiniteScalar(bottomRight)
+				) {
+					continue;
+				}
+
+				const minValue = Math.min(topLeft, topRight, bottomLeft, bottomRight);
+				const maxValue = Math.max(topLeft, topRight, bottomLeft, bottomRight);
+				if (minValue > 0 || maxValue < 0) continue;
+
+				const x0 = col * cellWidth;
+				const y0 = row * cellHeight;
+				const x1 = x0 + cellWidth;
+				const y1 = y0 + cellHeight;
+				const center: CanvasPoint = [x0 + cellWidth / 2, y0 + cellHeight / 2];
+				const centerValue = (topLeft + topRight + bottomLeft + bottomRight) / 4;
+
+				this.appendTriangleContour(ctx, [x0, y0], topLeft, [x1, y0], topRight, center, centerValue);
+				this.appendTriangleContour(
+					ctx,
+					[x1, y0],
+					topRight,
+					[x1, y1],
+					bottomRight,
+					center,
+					centerValue
+				);
+				this.appendTriangleContour(
+					ctx,
+					[x1, y1],
+					bottomRight,
+					[x0, y1],
+					bottomLeft,
+					center,
+					centerValue
+				);
+				this.appendTriangleContour(
+					ctx,
+					[x0, y1],
+					bottomLeft,
+					[x0, y0],
+					topLeft,
+					center,
+					centerValue
+				);
+			}
+		}
+	}
+
+	private fillScalarMask(
+		ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+		field: ScalarField,
+		isInside: (value: number) => boolean
+	): void {
+		const { values, cols, rows, cellWidth, cellHeight } = field;
+		const stride = cols + 1;
+
+		ctx.beginPath();
+
+		for (let row = 0; row < rows; row += 1) {
+			for (let col = 0; col < cols; col += 1) {
+				const topLeft = values[row * stride + col]!;
+				const topRight = values[row * stride + col + 1]!;
+				const bottomLeft = values[(row + 1) * stride + col]!;
+				const bottomRight = values[(row + 1) * stride + col + 1]!;
+
+				if (
+					!isFiniteScalar(topLeft) ||
+					!isFiniteScalar(topRight) ||
+					!isFiniteScalar(bottomLeft) ||
+					!isFiniteScalar(bottomRight)
+				) {
+					continue;
+				}
+
+				const insideTopLeft = isInside(topLeft);
+				const insideTopRight = isInside(topRight);
+				const insideBottomLeft = isInside(bottomLeft);
+				const insideBottomRight = isInside(bottomRight);
+				const insideCount =
+					Number(insideTopLeft) +
+					Number(insideTopRight) +
+					Number(insideBottomLeft) +
+					Number(insideBottomRight);
+
+				if (!insideCount) continue;
+
+				const x0 = col * cellWidth;
+				const y0 = row * cellHeight;
+				const x1 = x0 + cellWidth;
+				const y1 = y0 + cellHeight;
+
+				if (insideCount === 4) {
+					ctx.rect(x0, y0, cellWidth, cellHeight);
+					continue;
+				}
+
+				const center: CanvasPoint = [x0 + cellWidth / 2, y0 + cellHeight / 2];
+				const centerValue = (topLeft + topRight + bottomLeft + bottomRight) / 4;
+
+				this.appendTriangleFill(
+					ctx,
+					[x0, y0],
+					topLeft,
+					[x1, y0],
+					topRight,
+					center,
+					centerValue,
+					isInside
+				);
+				this.appendTriangleFill(
+					ctx,
+					[x1, y0],
+					topRight,
+					[x1, y1],
+					bottomRight,
+					center,
+					centerValue,
+					isInside
+				);
+				this.appendTriangleFill(
+					ctx,
+					[x1, y1],
+					bottomRight,
+					[x0, y1],
+					bottomLeft,
+					center,
+					centerValue,
+					isInside
+				);
+				this.appendTriangleFill(
+					ctx,
+					[x0, y1],
+					bottomLeft,
+					[x0, y0],
+					topLeft,
+					center,
+					centerValue,
+					isInside
+				);
+			}
+		}
+
+		ctx.fill();
 	}
 
 	private drawBackground(surface: SurfaceContext): void {
@@ -593,21 +1097,28 @@ export class CanvasRenderer {
 		ctx.restore();
 	}
 
-	private drawInequalitySystems(surface: SurfaceContext): void {
+	private drawInequalitySystems(surface: SurfaceContext, viewportKey: string): void {
 		const inequalities = this.state.equations.filter(
-			(equation) => equation.visible && !equation.errorMessage && equation.kind === 'inequality' && equation.inequality
+			(equation) =>
+				equation.visible &&
+				!equation.errorMessage &&
+				equation.kind === 'inequality' &&
+				equation.inequality
 		);
 
-		for (const equation of inequalities) {
-			this.drawInequalityShading(surface, equation, 0.15);
+		if (inequalities.length === 1) {
+			this.drawInequalityShading(surface, inequalities[0]!, 0.15, viewportKey);
+			return;
 		}
 
 		if (inequalities.length < 2) return;
 		const { width, height } = surface;
 		const cacheKey = [
 			'ineq-system',
-			inequalities.map((equation) => `${equation.id}:${equation.raw}:${equation.lineStyle}`).join('|'),
-			this.viewportBucket(0.05, 0.05),
+			inequalities
+				.map((equation) => `${equation.id}:${equation.raw}:${equation.lineStyle}`)
+				.join('|'),
+			viewportKey,
 			Object.values(this.state.variableScope()).join(':')
 		].join(':');
 		let layer = this.inequalitySystemCache.get(cacheKey);
@@ -618,34 +1129,118 @@ export class CanvasRenderer {
 			const ctx = created.ctx;
 			if (!ctx) return;
 			ctx.clearRect(0, 0, width, height);
+			const cols = Math.min(260, Math.max(96, Math.ceil(width / 7)));
+			const rows = Math.min(220, Math.max(84, Math.ceil(height / 7)));
+			const scope = this.state.variableScope();
+			const field = this.sampleScalarField(surface, cols, rows, (x, y) => {
+				for (const equation of inequalities) {
+					const value = evaluateImplicitAt(
+						equation.compiledExpression ?? equation.compiled,
+						x,
+						y,
+						scope
+					);
 
-			const buffers = inequalities.map(() => {
-				const buffer = this.createCacheLayer(width, height, surface.dpr);
-				return { canvas: buffer.layer, ctx: buffer.ctx! };
+					if (!Number.isFinite(value)) {
+						return Number.NaN;
+					}
+
+					const finiteValue = value as number;
+					const inside =
+						equation.inequality?.operator === '>'
+							? finiteValue > 0
+							: equation.inequality?.operator === '>='
+								? finiteValue >= 0
+								: equation.inequality?.operator === '<'
+									? finiteValue < 0
+									: finiteValue <= 0;
+
+					if (!inside) {
+						return 1;
+					}
+				}
+
+				return -1;
 			});
-
-			buffers.forEach((buffer, index) => {
-				this.drawInequalityMask(buffer.ctx, inequalities[index]!, 1);
-			});
-
-			const base = buffers.shift();
-			if (!base) return;
-			ctx.drawImage(base.canvas, 0, 0, width, height);
-			for (const buffer of buffers) {
-				ctx.globalCompositeOperation = 'source-in';
-				ctx.drawImage(buffer.canvas, 0, 0, width, height);
-			}
-
 			const colors = inequalities.map((equation) => equation.color);
 			const fill = colors.reduce((current, color) => blendLinearRgb(current, color));
-			ctx.globalCompositeOperation = 'source-atop';
 			ctx.fillStyle = fill;
 			ctx.globalAlpha = 0.25;
-			ctx.fillRect(0, 0, width, height);
+			this.fillScalarMask(ctx, field, (value) => value <= 0);
 			this.setCanvasCacheEntry(this.inequalitySystemCache, cacheKey, layer);
 		}
 
 		surface.ctx.drawImage(layer, 0, 0, width, height);
+
+		for (const equation of inequalities) {
+			this.drawInequalityBoundary(surface, equation);
+		}
+	}
+
+	private drawInequalityBoundary(surface: SurfaceContext, equation: PlotEquation): void {
+		const inequality = equation.inequality;
+
+		if (!inequality) {
+			return;
+		}
+
+		const ctx = surface.ctx;
+		const scope = this.state.variableScope();
+		const strict = inequality.operator === '>' || inequality.operator === '<';
+
+		ctx.save();
+		ctx.strokeStyle = equation.color;
+		ctx.lineWidth = 1.5;
+		ctx.setLineDash(
+			strict && equation.lineStyle === 'solid' ? [6, 4] : dashPattern(equation.lineStyle)
+		);
+
+		if (inequality.isExplicitYBoundary) {
+			const range = this.expandedMathRange();
+			const step = (range.xMax - range.xMin) / Math.max(320, this.surface.width);
+			let started = false;
+			let previousY: number | null = null;
+			ctx.beginPath();
+
+			for (let x = range.xMin; x <= range.xMax; x += step) {
+				const y = evaluateInequalityBoundaryAt(inequality, x, scope);
+
+				if (y === null || !Number.isFinite(y)) {
+					started = false;
+					previousY = null;
+					continue;
+				}
+
+				const [cx, rawCy] = this.mathToCanvas(x, y);
+				const cy = clamp(rawCy, -20, this.surface.height + 20);
+
+				if (previousY !== null && Math.abs(cy - previousY) > this.surface.height * 3) {
+					started = false;
+				}
+
+				if (!started) {
+					ctx.moveTo(cx, cy);
+					started = true;
+				} else {
+					ctx.lineTo(cx, cy);
+				}
+
+				previousY = cy;
+			}
+
+			ctx.stroke();
+		} else {
+			const cols = Math.min(320, Math.max(120, Math.ceil(surface.width / 6)));
+			const rows = Math.min(240, Math.max(96, Math.ceil(surface.height / 6)));
+			const field = this.sampleScalarField(surface, cols, rows, (x, y) =>
+				evaluateImplicitAt(equation.compiledExpression ?? equation.compiled, x, y, scope)
+			);
+			ctx.beginPath();
+			this.traceScalarContour(ctx, field);
+			ctx.stroke();
+		}
+
+		ctx.restore();
 	}
 
 	private drawInequalityMask(
@@ -721,35 +1316,36 @@ export class CanvasRenderer {
 				ctx.fill();
 			}
 		} else {
-			for (let y = 0; y < height; y += 4) {
-				for (let x = 0; x < width; x += 1) {
-					const [mx, my] = this.canvasToMath(x + 0.5, y + 2);
-					const lhs = equation.inequality?.lhsCompiled.evaluate({ ...scope, x: mx, y: my });
-					const rhs = equation.inequality?.rhsCompiled.evaluate({ ...scope, x: mx, y: my });
-					if (typeof lhs !== 'number' || typeof rhs !== 'number') continue;
-					const holds =
-						equation.inequality?.operator === '>'
-							? lhs > rhs
-							: equation.inequality?.operator === '>='
-								? lhs >= rhs
-								: equation.inequality?.operator === '<'
-								? lhs < rhs
-								: lhs <= rhs;
-					if (holds) ctx.fillRect(x, y, 1, 4);
-				}
-			}
+			const cols = Math.min(320, Math.max(120, Math.ceil(width / 6)));
+			const rows = Math.min(240, Math.max(96, Math.ceil(height / 6)));
+			const field = this.sampleScalarField(this.surface, cols, rows, (x, y) =>
+				evaluateImplicitAt(equation.compiledExpression ?? equation.compiled, x, y, scope)
+			);
+			const isInside = (value: number): boolean => {
+				if (!isFiniteScalar(value)) return false;
+				if (inequality.operator === '>') return value > 0;
+				if (inequality.operator === '>=') return value >= 0;
+				if (inequality.operator === '<') return value < 0;
+				return value <= 0;
+			};
+			this.fillScalarMask(ctx, field, isInside);
 		}
 
 		ctx.restore();
 	}
 
-	private drawInequalityShading(surface: SurfaceContext, equation: PlotEquation, alpha: number): void {
+	private drawInequalityShading(
+		surface: SurfaceContext,
+		equation: PlotEquation,
+		alpha: number,
+		viewportKey: string
+	): void {
 		const inequality = equation.inequality;
 		if (!inequality) return;
 		const cacheKey = [
 			equation.id,
 			equation.raw,
-			this.viewportBucket(0.05, 0.05),
+			viewportKey,
 			alpha,
 			Object.values(this.state.variableScope()).join(':')
 		].join(':');
@@ -760,50 +1356,16 @@ export class CanvasRenderer {
 			const ctx = created.ctx;
 			if (!ctx) return;
 			this.drawInequalityMask(ctx, equation, alpha);
-			const strict = inequality.operator === '>' || inequality.operator === '<';
-			ctx.save();
-			ctx.strokeStyle = equation.color;
-			ctx.lineWidth = 1.5;
-			ctx.setLineDash(
-				strict && equation.lineStyle === 'solid' ? [6, 4] : dashPattern(equation.lineStyle)
+			this.drawInequalityBoundary(
+				{ ...surface, ctx: ctx as CanvasRenderingContext2D, dpr: surface.dpr },
+				equation
 			);
-
-			if (inequality.isExplicitYBoundary) {
-				const range = this.expandedMathRange();
-				const step = (range.xMax - range.xMin) / Math.max(320, this.surface.width);
-				let started = false;
-				let previousY: number | null = null;
-				ctx.beginPath();
-				for (let x = range.xMin; x <= range.xMax; x += step) {
-					const y = evaluateInequalityBoundaryAt(inequality, x, this.state.variableScope());
-					if (y === null || !Number.isFinite(y)) {
-						started = false;
-						previousY = null;
-						continue;
-					}
-					const [cx, rawCy] = this.mathToCanvas(x, y);
-					const cy = clamp(rawCy, -20, this.surface.height + 20);
-					if (previousY !== null && Math.abs(cy - previousY) > this.surface.height * 3) {
-						started = false;
-					}
-					if (!started) {
-						ctx.moveTo(cx, cy);
-						started = true;
-					} else {
-						ctx.lineTo(cx, cy);
-					}
-					previousY = cy;
-				}
-				ctx.stroke();
-			}
-
-			ctx.restore();
 			this.setCanvasCacheEntry(this.shadingCache, cacheKey, layer);
 		}
 		surface.ctx.drawImage(layer, 0, 0, surface.width, surface.height);
 	}
 
-	private drawEquations(surface: SurfaceContext): void {
+	private drawEquations(surface: SurfaceContext, viewportKey: string): void {
 		const visibleCount = Math.max(
 			1,
 			this.state.equations.filter(
@@ -813,14 +1375,19 @@ export class CanvasRenderer {
 		for (const equation of this.state.equations) {
 			if (!equation.visible || equation.errorMessage || equation.kind === 'inequality') continue;
 			const startedAt = performance.now();
-			this.drawCurve(surface, equation, visibleCount);
+			this.drawCurve(surface, equation, visibleCount, viewportKey);
 			this.state.setEquationRenderTime(equation.id, performance.now() - startedAt);
 		}
 	}
 
-	private drawCurve(surface: SurfaceContext, equation: PlotEquation, visibleCount: number): void {
+	private drawCurve(
+		surface: SurfaceContext,
+		equation: PlotEquation,
+		visibleCount: number,
+		viewportKey: string
+	): void {
 		if (equation.kind === 'polar') {
-			this.drawPolarCurve(surface, equation);
+			this.drawPolarCurve(surface, equation, viewportKey);
 			return;
 		}
 
@@ -831,15 +1398,25 @@ export class CanvasRenderer {
 
 		const { ctx } = surface;
 		const range = this.expandedMathRange();
-		const frameBudget = Math.max(480, Math.floor(8000 / visibleCount));
-		const baseSamples = Math.min(frameBudget, Math.max(240, Math.round(surface.width * 0.75)));
-		const maxSamples = Math.max(baseSamples * 3, Math.min(2400, frameBudget * 2));
+		const budgetKey = `${visibleCount}:${surface.width}`;
+		let budget = this.curveBudgetCache.get(budgetKey);
+
+		if (!budget) {
+			const frameBudget = Math.max(480, Math.floor(8000 / visibleCount));
+			budget = {
+				baseSamples: Math.min(frameBudget, Math.max(240, Math.round(surface.width * 0.75))),
+				maxSamples: 0
+			};
+			budget.maxSamples = Math.max(budget.baseSamples * 3, Math.min(2400, frameBudget * 2));
+			this.curveBudgetCache.set(budgetKey, budget);
+		}
+
 		const segments = sampleEquation(
 			equation,
 			range.xMin,
 			range.xMax,
-			baseSamples,
-			maxSamples,
+			budget.baseSamples,
+			budget.maxSamples,
 			this.state.variableScope()
 		);
 
@@ -868,101 +1445,123 @@ export class CanvasRenderer {
 				lastSegment[lastSegment.length - 2]!,
 				lastSegment[lastSegment.length - 1]!
 			);
-			this.drawLabelText(ctx, equation.label || equation.raw, labelX + 10, labelY - 10, equation.color);
+			this.drawLabelText(
+				ctx,
+				equation.label || equation.raw,
+				labelX + 10,
+				labelY - 10,
+				equation.color
+			);
 		}
 
 		ctx.restore();
 	}
 
-	private drawPolarCurve(surface: SurfaceContext, equation: PlotEquation): void {
+	private drawPolarCurve(
+		surface: SurfaceContext,
+		equation: PlotEquation,
+		viewportKey: string
+	): void {
 		const { ctx } = surface;
-		const maxSteps = Math.min(4000, Math.max(1200, Math.round(this.state.view.scaleX * 120)));
-		const start = 0;
-		const maxTheta = Math.PI * 4;
-		const step = (maxTheta - start) / maxSteps;
-		const points: Array<[number, number]> = [];
-		let closureDetected = false;
-		let startPoint: [number, number] | null = null;
+		const cacheKey = `${equation.id}:${equation.raw}:${viewportKey}:${Object.values(this.state.variableScope()).join(':')}`;
+		let layer = this.polarCache.get(cacheKey);
 
-		ctx.save();
-		ctx.beginPath();
-		ctx.strokeStyle = equation.color;
-		ctx.lineWidth = equation.lineWidth;
-		ctx.globalAlpha = equation.opacity;
-		ctx.setLineDash(dashPattern(equation.lineStyle));
+		if (!layer) {
+			const created = this.createCacheLayer(surface.width, surface.height, surface.dpr);
+			layer = created.layer;
+			const layerCtx = created.ctx;
+			if (!layerCtx) return;
+			const maxSteps = Math.min(2200, Math.max(720, Math.round(this.state.view.scaleX * 48)));
+			const start = 0;
+			const maxTheta = Math.PI * 4;
+			const step = (maxTheta - start) / maxSteps;
+			const points: Array<[number, number]> = [];
+			let startPoint: [number, number] | null = null;
 
-		for (let index = 0; index <= maxSteps; index += 1) {
-			const theta = start + step * index;
-			const r = evaluatePolarAt(equation.compiledExpression ?? equation.compiled, theta, this.state.variableScope());
-			if (r === null || Number.isNaN(r) || Math.abs(r) > 1e6) {
-				if (points.length > 1) this.drawPolyline(ctx, points.splice(0, points.length), surface.width, surface.height);
-				startPoint = null;
-				continue;
+			layerCtx.save();
+			layerCtx.beginPath();
+			layerCtx.strokeStyle = equation.color;
+			layerCtx.lineWidth = equation.lineWidth;
+			layerCtx.globalAlpha = equation.opacity;
+			layerCtx.setLineDash(dashPattern(equation.lineStyle));
+
+			for (let index = 0; index <= maxSteps; index += 1) {
+				const theta = start + step * index;
+				const r = evaluatePolarAt(
+					equation.compiledExpression ?? equation.compiled,
+					theta,
+					this.state.variableScope()
+				);
+				if (r === null || Number.isNaN(r) || Math.abs(r) > 1e6) {
+					if (points.length > 1) {
+						this.drawPolyline(
+							layerCtx,
+							points.splice(0, points.length),
+							surface.width,
+							surface.height
+						);
+					}
+					startPoint = null;
+					continue;
+				}
+				const mx = r * Math.cos(theta);
+				const my = r * Math.sin(theta);
+				const point = this.mathToCanvas(mx, my);
+				if (!startPoint) startPoint = point;
+				points.push(point);
+
+				if (
+					index > maxSteps / 4 &&
+					startPoint &&
+					Math.hypot(point[0] - startPoint[0], point[1] - startPoint[1]) < 1
+				) {
+					break;
+				}
 			}
-			const mx = r * Math.cos(theta);
-			const my = r * Math.sin(theta);
-			const point = this.mathToCanvas(mx, my);
-			if (!startPoint) startPoint = point;
-			points.push(point);
 
-			if (index > maxSteps / 4 && startPoint && Math.hypot(point[0] - startPoint[0], point[1] - startPoint[1]) < 1) {
-				closureDetected = true;
-				break;
-			}
+			if (points.length > 1) this.drawPolyline(layerCtx, points, surface.width, surface.height);
+			layerCtx.stroke();
+			layerCtx.restore();
+			this.setCanvasCacheEntry(this.polarCache, cacheKey, layer);
 		}
 
-		if (points.length > 1) this.drawPolyline(ctx, points, surface.width, surface.height);
-		ctx.stroke();
-		ctx.restore();
-		void closureDetected;
+		ctx.drawImage(layer, 0, 0, surface.width, surface.height);
 	}
 
 	private drawImplicitCurve(surface: SurfaceContext, equation: PlotEquation): void {
 		const { ctx } = surface;
-		const range = this.visibleMathRange();
 		const scope = this.state.variableScope();
-		const cols = Math.min(300, Math.max(80, Math.ceil(surface.width / 8)));
-		const rows = Math.min(300, Math.max(80, Math.ceil(surface.height / 8)));
-		const dx = (range.xMax - range.xMin) / cols;
-		const dy = (range.yMax - range.yMin) / rows;
+		const cols = Math.min(360, Math.max(128, Math.ceil(surface.width / 6)));
+		const rows = Math.min(300, Math.max(128, Math.ceil(surface.height / 6)));
+		const field = this.sampleScalarField(surface, cols, rows, (x, y) =>
+			evaluateImplicitAt(equation.compiledExpression ?? equation.compiled, x, y, scope)
+		);
+
 		ctx.save();
 		ctx.strokeStyle = equation.color;
 		ctx.lineWidth = equation.lineWidth;
 		ctx.globalAlpha = equation.opacity;
 		ctx.setLineDash(dashPattern(equation.lineStyle));
 		ctx.beginPath();
-
-		for (let row = 0; row < rows; row += 1) {
-			for (let col = 0; col < cols; col += 1) {
-				const x = range.xMin + col * dx;
-				const y = range.yMin + row * dy;
-				const values = [
-					evaluateImplicitAt(equation.compiledExpression ?? equation.compiled, x, y, scope),
-					evaluateImplicitAt(equation.compiledExpression ?? equation.compiled, x + dx, y, scope),
-					evaluateImplicitAt(equation.compiledExpression ?? equation.compiled, x + dx, y + dy, scope),
-					evaluateImplicitAt(equation.compiledExpression ?? equation.compiled, x, y + dy, scope)
-				];
-				const signs = values.map((value) => (value === null ? 0 : Math.sign(value)));
-				if (Math.max(...signs) === Math.min(...signs)) continue;
-				const [cx, cy] = this.mathToCanvas(x, y);
-				ctx.rect(cx, cy, dx * this.state.view.scaleX, dy * this.state.view.scaleY);
-			}
-		}
-
+		this.traceScalarContour(ctx, field);
 		ctx.stroke();
 		ctx.restore();
 	}
 
-	private drawScatterData(surface: SurfaceContext): void {
+	private drawScatterData(surface: SurfaceContext, viewportKey: string): void {
 		for (const series of this.state.dataSeries.filter((entry) => entry.plotted && entry.visible)) {
-			this.drawScatterSeries(surface, series);
+			this.drawScatterSeries(surface, series, viewportKey);
 		}
 	}
 
-	private drawScatterSeries(surface: SurfaceContext, series: DataSeries): void {
+	private drawScatterSeries(
+		surface: SurfaceContext,
+		series: DataSeries,
+		viewportKey: string
+	): void {
 		const cacheKey = [
 			series.id,
-			this.viewportBucket(),
+			viewportKey,
 			series.style.symbol,
 			series.style.size,
 			series.style.color,
@@ -1007,7 +1606,14 @@ export class CanvasRenderer {
 			for (let index = 0; index < points.length; index += 1) {
 				const point = points[index]!;
 				const [cx, cy] = this.mathToCanvas(point.x, point.y);
-				this.drawScatterSymbol(ctx, cx, cy, series.style.symbol, series.style.size, series.style.color);
+				this.drawScatterSymbol(
+					ctx,
+					cx,
+					cy,
+					series.style.symbol,
+					series.style.size,
+					series.style.color
+				);
 			}
 
 			this.setCanvasCacheEntry(this.scatterCache, cacheKey, layer);
@@ -1066,7 +1672,13 @@ export class CanvasRenderer {
 	private drawCriticalPointOverlays(surface: SurfaceContext): void {
 		if (!this.state.settings.showCriticalPoints) return;
 		for (const equation of this.state.equations) {
-			if (!equation.visible || equation.errorMessage || !equation.showMarkers || equation.kind !== 'cartesian') continue;
+			if (
+				!equation.visible ||
+				equation.errorMessage ||
+				!equation.showMarkers ||
+				equation.kind !== 'cartesian'
+			)
+				continue;
 			this.drawCriticalPoints(surface, this.state.getCriticalPoints(equation.id), equation.color);
 		}
 	}
@@ -1113,7 +1725,13 @@ export class CanvasRenderer {
 				ctx.strokeStyle = '#ffffff';
 				ctx.lineWidth = 1;
 				ctx.stroke();
-				this.drawClippedText(ctx, `(${formatSig(point.x)}, ${formatSig(point.y)})`, cx, cy - 14, tokens.text);
+				this.drawClippedText(
+					ctx,
+					`(${formatSig(point.x)}, ${formatSig(point.y)})`,
+					cx,
+					cy - 14,
+					tokens.text
+				);
 			} else if (point.kind === 'localMin') {
 				ctx.beginPath();
 				ctx.moveTo(cx, cy + 8);
@@ -1125,7 +1743,13 @@ export class CanvasRenderer {
 				ctx.strokeStyle = '#ffffff';
 				ctx.lineWidth = 1;
 				ctx.stroke();
-				this.drawClippedText(ctx, `(${formatSig(point.x)}, ${formatSig(point.y)})`, cx, cy + 18, tokens.text);
+				this.drawClippedText(
+					ctx,
+					`(${formatSig(point.x)}, ${formatSig(point.y)})`,
+					cx,
+					cy + 18,
+					tokens.text
+				);
 			} else {
 				ctx.save();
 				ctx.translate(cx, cy);
@@ -1140,14 +1764,25 @@ export class CanvasRenderer {
 				ctx.globalAlpha = 1;
 				ctx.stroke();
 				ctx.restore();
-				this.drawClippedText(ctx, `x = ${formatSig(point.x)}`, cx + 26, cy + 4, tokens.text, 'left');
+				this.drawClippedText(
+					ctx,
+					`x = ${formatSig(point.x)}`,
+					cx + 26,
+					cy + 4,
+					tokens.text,
+					'left'
+				);
 			}
 		}
 
 		ctx.restore();
 	}
 
-	private drawIntersectionMarker(surface: SurfaceContext, point: IntersectionPoint, color: string): void {
+	private drawIntersectionMarker(
+		surface: SurfaceContext,
+		point: IntersectionPoint,
+		color: string
+	): void {
 		const { ctx } = surface;
 		const tokens = this.readTokens();
 		const [cx, cy] = this.mathToCanvas(point.x, point.y);
@@ -1217,7 +1852,16 @@ export class CanvasRenderer {
 			const deltaY = Math.abs(current[1] - previous[1]);
 			const angle = Math.atan2(deltaY, Math.max(deltaX, 1e-6));
 			if (deltaX < 12 && deltaY > height * 0.9 && angle > 1.48) continue;
-			const clipped = clipLineToRect(previous[0], previous[1], current[0], current[1], left, top, right, bottom);
+			const clipped = clipLineToRect(
+				previous[0],
+				previous[1],
+				current[0],
+				current[1],
+				left,
+				top,
+				right,
+				bottom
+			);
 			if (!clipped) continue;
 			ctx.moveTo(clipped[0], clipped[1]);
 			ctx.lineTo(clipped[2], clipped[3]);
@@ -1226,7 +1870,9 @@ export class CanvasRenderer {
 
 	private drawTracePoint(surface: SurfaceContext): void {
 		if (!this.ui?.tracePoint || this.state.view.isPanning || this.state.view.isAnimating) return;
-		const equation = this.state.equations.find((entry) => entry.id === this.ui?.tracePoint?.equationId);
+		const equation = this.state.equations.find(
+			(entry) => entry.id === this.ui?.tracePoint?.equationId
+		);
 		const [cx, cy] = this.mathToCanvas(this.ui.tracePoint.x, this.ui.tracePoint.y);
 		const { ctx } = surface;
 		ctx.save();
@@ -1261,7 +1907,12 @@ export class CanvasRenderer {
 		ctx.moveTo(0, this.pointer.y);
 		ctx.lineTo(width, this.pointer.y);
 		ctx.stroke();
-		this.drawChip(ctx, this.pointer.x + 14, this.pointer.y + 14, `x ${formatCoordinate(mx)} · y ${formatCoordinate(my)}`);
+		this.drawChip(
+			ctx,
+			this.pointer.x + 14,
+			this.pointer.y + 14,
+			`x ${formatCoordinate(mx)} · y ${formatCoordinate(my)}`
+		);
 		ctx.restore();
 	}
 

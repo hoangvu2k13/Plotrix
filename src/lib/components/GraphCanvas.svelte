@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { Home, Maximize2, Minus, Plus } from '@lucide/svelte';
 	import { onMount } from 'svelte';
 
+	import Icon from '$components/Icon.svelte';
 	import { InteractionManager } from '$lib/input/interactions';
 	import { CanvasRenderer } from '$lib/renderer/canvas';
 	import type { GraphState } from '$stores/graph.svelte';
@@ -10,6 +12,7 @@
 	let host: HTMLDivElement | null = null;
 	let canvas: HTMLCanvasElement | null = null;
 	let renderer: CanvasRenderer | null = null;
+	let ready = $state(false);
 
 	function zoomIn(): void {
 		ui.pingInteraction();
@@ -40,6 +43,9 @@
 		graph.attachExporter(renderer);
 		const rect = host.getBoundingClientRect();
 		renderer.resize(rect.width, rect.height);
+		requestAnimationFrame(() => {
+			ready = true;
+		});
 
 		const interactions = new InteractionManager(canvas, graph, ui, renderer);
 		let resizeFrame = 0;
@@ -60,6 +66,7 @@
 			interactions.destroy();
 			renderer?.destroy();
 			graph.attachExporter(null);
+			ready = false;
 		};
 	});
 
@@ -68,7 +75,6 @@
 		ui.highlightedAsymptotes;
 		renderer?.render();
 	});
-
 </script>
 
 <div class="canvas-shell" bind:this={host}>
@@ -79,31 +85,34 @@
 		aria-label="Interactive Plotrix graph canvas"
 	></canvas>
 
+	{#if !ready}
+		<div class="canvas-skeleton" aria-hidden="true">
+			<div></div>
+			<div></div>
+			<div></div>
+		</div>
+	{:else if graph.equations.length === 0}
+		<div class="canvas-empty">
+			<strong>Start plotting</strong>
+			<p>Add an equation from the sidebar or swipe in from the left edge on mobile.</p>
+		</div>
+	{/if}
+
 	<div class="zoom-pod" aria-label="Viewport controls">
 		<button type="button" class="zoom-icon" aria-label="Zoom in" onclick={zoomIn}>
-			<svg viewBox="0 0 20 20" aria-hidden="true">
-				<path
-					d="M10 4.5v11M4.5 10h11"
-					fill="none"
-					stroke="currentColor"
-					stroke-linecap="round"
-					stroke-width="1.8"
-				/>
-			</svg>
+			<Icon icon={Plus} size="var(--icon-lg)" class="zoom-glyph" />
 		</button>
 		<button type="button" class="zoom-icon" aria-label="Zoom out" onclick={zoomOut}>
-			<svg viewBox="0 0 20 20" aria-hidden="true">
-				<path
-					d="M4.5 10h11"
-					fill="none"
-					stroke="currentColor"
-					stroke-linecap="round"
-					stroke-width="1.8"
-				/>
-			</svg>
+			<Icon icon={Minus} size="var(--icon-lg)" class="zoom-glyph" />
 		</button>
-		<button type="button" class="zoom-label" onclick={fitAll}>Fit</button>
-		<button type="button" class="zoom-label" onclick={resetView}>Reset</button>
+		<button type="button" class="zoom-label" onclick={fitAll}>
+			<Icon icon={Maximize2} size="var(--icon-md)" class="zoom-glyph" />
+			<span>Fit all</span>
+		</button>
+		<button type="button" class="zoom-label" onclick={resetView}>
+			<Icon icon={Home} size="var(--icon-md)" class="zoom-glyph" />
+			<span>Reset</span>
+		</button>
 	</div>
 </div>
 
@@ -130,7 +139,44 @@
 		width: 100%;
 		height: 100%;
 		min-height: 540px;
+		border-radius: calc(var(--radius-2xl) + 4px);
 		cursor: grab;
+	}
+
+	.canvas-skeleton,
+	.canvas-empty {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		place-items: center;
+		pointer-events: none;
+	}
+
+	.canvas-skeleton {
+		gap: var(--space-3);
+		padding: var(--space-8);
+		align-content: center;
+	}
+
+	.canvas-skeleton div {
+		width: min(420px, 70%);
+		height: 18px;
+		border-radius: var(--radius-full);
+		background: linear-gradient(
+			90deg,
+			var(--color-bg-overlay),
+			color-mix(in srgb, var(--color-bg-overlay) 56%, var(--color-bg-surface)),
+			var(--color-bg-overlay)
+		);
+		background-size: 200% 100%;
+		animation: graph-shimmer 1.2s ease-in-out infinite;
+	}
+
+	.canvas-empty {
+		gap: var(--space-2);
+		padding: var(--space-8);
+		text-align: center;
+		color: var(--color-text-secondary);
 	}
 
 	.canvas:active {
@@ -160,7 +206,7 @@
 		min-width: 36px;
 		padding: 0 12px;
 		border: 0;
-		border-radius: 16px;
+		border-radius: var(--radius-full);
 		background: transparent;
 		color: var(--color-text-secondary);
 		cursor: pointer;
@@ -179,13 +225,24 @@
 		transform: translateY(1px);
 	}
 
-	.zoom-icon svg {
-		width: 18px;
-		height: 18px;
-	}
-
 	.zoom-label {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
 		font-size: var(--text-sm);
 		font-weight: var(--font-weight-medium);
+	}
+
+	:global(.zoom-glyph) {
+		display: block;
+	}
+
+	@keyframes graph-shimmer {
+		from {
+			background-position: 200% 0;
+		}
+		to {
+			background-position: -200% 0;
+		}
 	}
 </style>

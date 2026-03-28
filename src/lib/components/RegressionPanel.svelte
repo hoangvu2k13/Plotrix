@@ -25,14 +25,22 @@
 			type: 'module'
 		});
 		regressionWorker.onmessage = (event: MessageEvent) => {
-			const data = event.data as { type?: string; result?: RegressionResult };
+			const data = event.data as {
+				type?: string;
+				result?: RegressionResult & { coefficients?: Float64Array | number[] };
+			};
 
 			if (data?.type !== 'fit' || !data.result) {
 				return;
 			}
 
-			currentResult = data.result;
-			graph.upsertRegressionResult(data.result);
+			const normalized: RegressionResult = {
+				...data.result,
+				coefficients: Array.from(data.result.coefficients ?? [])
+			};
+
+			currentResult = normalized;
+			graph.upsertRegressionResult(normalized);
 			pending = false;
 		};
 
@@ -41,7 +49,9 @@
 
 	const dataset = $derived.by(() => {
 		const active =
-			graph.dataSeries.find((series: GraphState['dataSeries'][number]) => series.id === ui.activeRegressionSeriesId) ??
+			graph.dataSeries.find(
+				(series: GraphState['dataSeries'][number]) => series.id === ui.activeRegressionSeriesId
+			) ??
 			graph.dataSeries.find((series: GraphState['dataSeries'][number]) => series.plotted) ??
 			graph.dataSeries[0];
 
@@ -49,14 +59,22 @@
 
 		const rows = active.rows
 			.map((row: string[]) => ({ x: Number(row[0]), y: Number(row[1]) }))
-			.filter((point: { x: number; y: number }) => Number.isFinite(point.x) && Number.isFinite(point.y));
+			.filter(
+				(point: { x: number; y: number }) => Number.isFinite(point.x) && Number.isFinite(point.y)
+			);
 
 		return rows.length
-			? { active, x: rows.map((row: { x: number; y: number }) => row.x), y: rows.map((row: { x: number; y: number }) => row.y) }
+			? {
+					active,
+					x: rows.map((row: { x: number; y: number }) => row.x),
+					y: rows.map((row: { x: number; y: number }) => row.y)
+				}
 			: null;
 	});
 
-	const comparison = $derived([...graph.regressionResults].sort((left, right) => right.metrics.r2 - left.metrics.r2));
+	const comparison = $derived(
+		[...graph.regressionResults].sort((left, right) => right.metrics.r2 - left.metrics.r2)
+	);
 	const equationHtml = $derived.by(() => {
 		if (!currentResult) return '';
 		try {
@@ -72,15 +90,18 @@
 		pending = true;
 		const x = new Float64Array(dataset.x);
 		const y = new Float64Array(dataset.y);
-		worker.postMessage({
-			type: 'fit',
-			key: `${model}:${Date.now()}`,
-			model,
-			x,
-			y,
-			degree,
-			expression: customExpression
-		}, [x.buffer, y.buffer]);
+		worker.postMessage(
+			{
+				type: 'fit',
+				key: `${model}:${Date.now()}`,
+				model,
+				x,
+				y,
+				degree,
+				expression: customExpression
+			},
+			[x.buffer, y.buffer]
+		);
 	}
 
 	function addToGraph(): void {
@@ -102,16 +123,13 @@
 
 <div class="panel">
 	<div class="models" role="tablist" aria-label="Regression model">
-		{#each [
-			['linear', 'Linear'],
-			['polynomial', 'Poly'],
-			['exponential', 'Exp'],
-			['logarithmic', 'Log'],
-			['power', 'Power'],
-			['sinusoidal', 'Sine'],
-			['custom', 'Custom']
-		] as [value, label]}
-			<button type="button" role="tab" class:active={model === value} onclick={() => (model = value as RegressionModel)}>
+		{#each [['linear', 'Linear'], ['polynomial', 'Poly'], ['exponential', 'Exp'], ['logarithmic', 'Log'], ['power', 'Power'], ['sinusoidal', 'Sine'], ['custom', 'Custom']] as [value, label]}
+			<button
+				type="button"
+				role="tab"
+				class:active={model === value}
+				onclick={() => (model = value as RegressionModel)}
+			>
 				{label}
 			</button>
 		{/each}
@@ -130,12 +148,24 @@
 		<ExpressionEditor value={customExpression} onChange={(value) => (customExpression = value)} />
 	{/if}
 
-	<button type="button" class="fit" onclick={fit} disabled={!dataset || pending}>Fit</button>
+	<button
+		type="button"
+		class="fit"
+		title={!dataset
+			? 'Plot or enter at least two numeric data points to enable regression.'
+			: undefined}
+		onclick={fit}
+		disabled={!dataset || pending}
+	>
+		Fit
+	</button>
 
 	{#if currentResult}
 		<section class="results">
 			<div class="equation">{@html equationHtml}</div>
-			<div class={`badge ${badgeTone(currentResult.metrics.r2)}`}>R² {currentResult.metrics.r2.toPrecision(4)}</div>
+			<div class={`badge ${badgeTone(currentResult.metrics.r2)}`}>
+				R² {currentResult.metrics.r2.toPrecision(4)}
+			</div>
 			<p>RMSE {currentResult.metrics.rmse.toPrecision(4)}</p>
 			<p>MAE {currentResult.metrics.mae.toPrecision(4)}</p>
 			<button type="button" class="fit" onclick={addToGraph}>Add to graph</button>

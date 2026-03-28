@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { X } from '@lucide/svelte';
 	import type { Snippet } from 'svelte';
 	import { fade, fly } from 'svelte/transition';
+
+	import Icon from '$components/Icon.svelte';
 
 	let {
 		open = false,
@@ -52,16 +55,7 @@
 					{/if}
 				</div>
 				<button class="close" type="button" aria-label="Close dialog" onclick={onClose}>
-					<svg viewBox="0 0 20 20" aria-hidden="true">
-						<path
-							d="M5.5 5.5 14.5 14.5M14.5 5.5l-9 9"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.7"
-						/>
-					</svg>
+					<Icon icon={X} size="var(--icon-md)" class="close-icon" />
 				</button>
 			</header>
 			<div class="body">
@@ -85,6 +79,7 @@
 
 	.panel {
 		width: 70%;
+		max-width: 860px;
 		border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
 		border-radius: var(--radius-2xl);
 		background: color-mix(in srgb, var(--color-bg-surface) 92%, transparent);
@@ -135,9 +130,8 @@
 		transform: translateY(-1px);
 	}
 
-	.close svg {
-		width: 16px;
-		height: 16px;
+	:global(.close-icon) {
+		display: block;
 	}
 
 	.body {

@@ -1,13 +1,19 @@
 <script lang="ts">
+	import { autocompletion, closeBrackets, completeFromList } from '@codemirror/autocomplete';
 	import { EditorState } from '@codemirror/state';
+	import { bracketMatching } from '@codemirror/language';
+	import { linter } from '@codemirror/lint';
 	import { EditorView, keymap } from '@codemirror/view';
 	import { onMount } from 'svelte';
+
+	import { parseEquation, type EquationKind } from '$lib/math/engine';
 
 	let {
 		value = '',
 		placeholder = 'Enter an equation',
 		ariaLabel = 'Equation editor',
 		prefix = '',
+		kind = 'cartesian',
 		onChange,
 		onFocus,
 		onBlur
@@ -16,6 +22,7 @@
 		placeholder?: string;
 		ariaLabel?: string;
 		prefix?: string;
+		kind?: EquationKind;
 		onChange?: (value: string) => void;
 		onFocus?: () => void;
 		onBlur?: () => void;
@@ -24,10 +31,58 @@
 	let host: HTMLDivElement | null = null;
 	let view: EditorView | null = null;
 
+	const mathCompletions = completeFromList(
+		[
+			'sin',
+			'cos',
+			'tan',
+			'sec',
+			'csc',
+			'cot',
+			'asin',
+			'acos',
+			'atan',
+			'sinh',
+			'cosh',
+			'tanh',
+			'sqrt',
+			'abs',
+			'log',
+			'ln',
+			'exp',
+			'min',
+			'max',
+			'pow',
+			'pi',
+			'e',
+			'x',
+			'y',
+			't'
+		].map((label) => ({ label, type: 'function' }))
+	);
+
+	const mathLinter = linter((view) => {
+		const source = view.state.doc.toString();
+		const parsed = parseEquation(source, kind);
+
+		if (!source.trim() || !parsed.error) {
+			return [];
+		}
+
+		return [
+			{
+				from: 0,
+				to: Math.max(1, source.length),
+				severity: 'error',
+				message: parsed.error
+			}
+		];
+	});
+
 	const theme = EditorView.theme({
 		'&': {
 			fontFamily: 'var(--font-mono)',
-			fontSize: '1.15rem',
+			fontSize: 'var(--text-md)',
 			lineHeight: '1.55',
 			backgroundColor: 'transparent',
 			color: 'var(--color-text-primary)'
@@ -64,6 +119,14 @@
 		},
 		'.cm-selectionBackground': {
 			backgroundColor: 'color-mix(in srgb, var(--color-accent) 20%, transparent) !important'
+		},
+		'.cm-tooltip-autocomplete': {
+			border: '1px solid var(--color-border)',
+			borderRadius: 'var(--radius-md)',
+			backgroundColor: 'var(--color-bg-surface)'
+		},
+		'.cm-diagnostic': {
+			borderBottom: '2px wavy var(--color-danger)'
 		}
 	});
 
@@ -78,6 +141,12 @@
 				extensions: [
 					theme,
 					EditorView.lineWrapping,
+					bracketMatching(),
+					closeBrackets(),
+					autocompletion({
+						override: [mathCompletions]
+					}),
+					mathLinter,
 					EditorView.updateListener.of((update) => {
 						if (update.docChanged) {
 							onChange?.(update.state.doc.toString());
@@ -184,12 +253,11 @@
 		width: fit-content;
 		padding: var(--space-3) var(--space-4);
 		border-right: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
-		background:
-			linear-gradient(
-				180deg,
-				color-mix(in srgb, var(--color-bg-overlay) 98%, transparent),
-				color-mix(in srgb, var(--color-bg-surface) 92%, transparent)
-			);
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--color-bg-overlay) 98%, transparent),
+			color-mix(in srgb, var(--color-bg-surface) 92%, transparent)
+		);
 	}
 
 	.editor-body {
@@ -217,7 +285,7 @@
 		height: 100%;
 		color: color-mix(in srgb, var(--color-text-secondary) 92%, white 8%);
 		font-family: var(--font-mono);
-		font-size: 1.15rem;
+		font-size: var(--text-md);
 		font-weight: 700;
 		letter-spacing: 0.04em;
 		pointer-events: none;
@@ -232,7 +300,7 @@
 		padding-top: 1.125rem;
 		color: var(--color-text-muted);
 		font-family: var(--font-mono);
-		font-size: 1.1rem;
+		font-size: var(--text-md);
 		line-height: 1.55;
 		pointer-events: none;
 	}

@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { ChevronDown, Play, Square } from '@lucide/svelte';
 	import { onDestroy } from 'svelte';
 
+	import Icon from '$components/Icon.svelte';
 	import Slider from '$components/Slider.svelte';
 	import type { GraphState, Variable } from '$stores/graph.svelte';
 
@@ -49,11 +51,18 @@
 
 {#if graph.variables.length}
 	<section class="panel">
-		<button type="button" class="header" aria-expanded={!collapsed} onclick={() => (collapsed = !collapsed)}>
+		<button
+			type="button"
+			class="header"
+			aria-expanded={!collapsed}
+			onclick={() => (collapsed = !collapsed)}
+		>
 			<span>Variables</span>
-			<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed>
-				<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" />
-			</svg>
+			<Icon
+				icon={ChevronDown}
+				size="var(--icon-md)"
+				class={`header-icon ${collapsed ? 'collapsed' : ''}`}
+			/>
 		</button>
 
 		{#if !collapsed}
@@ -83,17 +92,15 @@
 							<button
 								type="button"
 								class="play"
-								aria-label={running.has(variable.name) ? `Stop animation for ${variable.name}` : `Play animation for ${variable.name}`}
+								aria-label={running.has(variable.name)
+									? `Stop animation for ${variable.name}`
+									: `Play animation for ${variable.name}`}
 								onclick={() => toggleAnimation(variable)}
 							>
 								{#if running.has(variable.name)}
-									<svg viewBox="0 0 20 20" aria-hidden="true">
-										<rect x="5.5" y="5.5" width="9" height="9" rx="1.5" fill="currentColor" />
-									</svg>
+									<Icon icon={Square} size="var(--icon-sm)" class="play-icon" />
 								{:else}
-									<svg viewBox="0 0 20 20" aria-hidden="true">
-										<path d="M7 5.5v9l7-4.5-7-4.5Z" fill="currentColor" />
-									</svg>
+									<Icon icon={Play} size="var(--icon-sm)" class="play-icon" />
 								{/if}
 							</button>
 						</div>
@@ -145,9 +152,13 @@
 		display: grid;
 		gap: var(--space-3);
 		padding: var(--space-3);
-		border: 1px solid var(--color-border);
+		border: 1px solid color-mix(in srgb, var(--color-accent) 18%, var(--color-border));
 		border-radius: var(--radius-xl);
-		background: color-mix(in srgb, var(--color-bg-surface) 96%, transparent);
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--color-accent) 7%, var(--color-bg-surface)),
+			color-mix(in srgb, var(--color-bg-surface) 96%, transparent)
+		);
 	}
 
 	.header {
@@ -162,13 +173,11 @@
 		cursor: pointer;
 	}
 
-	.header svg {
-		width: 16px;
-		height: 16px;
+	:global(.header-icon) {
 		transition: transform var(--duration-fast) var(--ease-default);
 	}
 
-	.header svg.collapsed {
+	:global(.header-icon.collapsed) {
 		transform: rotate(-90deg);
 	}
 
@@ -212,22 +221,31 @@
 		cursor: pointer;
 	}
 
-	.play svg {
-		width: 14px;
-		height: 14px;
+	:global(.play-icon) {
+		display: block;
 	}
 
 	.config {
-		grid-template-columns: 1fr auto 1fr auto;
+		grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr) 118px;
 		align-items: center;
 		font-size: var(--text-xs);
 		color: var(--color-text-secondary);
 	}
 
+	.config > span {
+		width: 24px;
+		text-align: center;
+	}
+
 	.config label {
-		display: inline-flex;
+		display: grid;
+		grid-template-columns: 34px minmax(64px, 84px);
 		align-items: center;
 		gap: var(--space-1);
+	}
+
+	.config label span {
+		width: 34px;
 	}
 
 	.separator {

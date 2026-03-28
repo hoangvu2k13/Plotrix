@@ -1,9 +1,9 @@
 import { nanoid } from 'nanoid';
 
+import { COLOR_PALETTE } from '$lib/constants/palette';
 import {
 	isSafeExpressionInput,
 	parseEquation,
-	sampleEquation,
 	type EquationKind,
 	type EvalFunction,
 	type InequalityNodes,
@@ -14,6 +14,7 @@ import type { CriticalPoint } from '$lib/analysis/criticalPoints';
 import type { EquationAnalysis } from '$lib/analysis/equationAnalysis';
 import type { IntersectionPoint } from '$lib/analysis/intersections';
 import type { RegressionResult } from '$lib/analysis/regression';
+import { LruMap } from '$lib/utils/lru';
 import { clamp } from '$utils/format';
 
 export interface Variable {
@@ -129,16 +130,6 @@ export interface GraphExporter {
 	requestRender?(): void;
 }
 
-const COLOR_PALETTE = [
-	'#6366f1',
-	'#0ea5e9',
-	'#14b8a6',
-	'#f97316',
-	'#ef4444',
-	'#8b5cf6',
-	'#84cc16',
-	'#ec4899'
-];
 const DEFAULT_VIEW: ViewState = {
 	originX: 0,
 	originY: 0,
@@ -147,8 +138,8 @@ const DEFAULT_VIEW: ViewState = {
 	isPanning: false,
 	isAnimating: false
 };
-const MIN_ZOOM = 1e-30;
-const MAX_ZOOM = 1e30;
+const MIN_ZOOM = 1e-6;
+const MAX_ZOOM = 1e6;
 const DEFAULT_SETTINGS: GraphSettings = {
 	theme: 'system',
 	gridVisible: true,
@@ -185,13 +176,23 @@ const ALLOWED_KINDS = new Set<EquationKind>([
 ]);
 const ALLOWED_THEMES = new Set<GraphSettings['theme']>(['system', 'light', 'dark']);
 const ALLOWED_GRID_STYLES = new Set<GraphSettings['gridStyle']>(['cartesian', 'polar']);
+const MAX_URL_SNAPSHOT_BYTES = 128_000;
+const MAX_DATA_SERIES = 12;
+const MAX_DATA_COLUMNS = 8;
+const MAX_DATA_ROWS = 1200;
+const MAX_CELL_CHARS = 32;
+const MAX_IMPORT_CELLS = MAX_DATA_SERIES * MAX_DATA_COLUMNS * MAX_DATA_ROWS;
+const MAX_REGRESSION_RESULTS = 24;
+const MAX_HISTORY_ENTRIES = 50;
+const MAX_ANALYSIS_CACHE_ENTRIES = 200;
 
 function base64UrlEncode(value: string): string {
 	const bytes = new TextEncoder().encode(value);
 	let binary = '';
+	const chunkSize = 0x8000;
 
-	for (const byte of bytes) {
-		binary += String.fromCharCode(byte);
+	for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+		binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
 	}
 
 	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
@@ -200,9 +201,46 @@ function base64UrlEncode(value: string): string {
 function base64UrlDecode(value: string): string {
 	const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
 	const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+
+	if (Math.floor((padded.length * 3) / 4) > MAX_URL_SNAPSHOT_BYTES) {
+		throw new Error('Shared Plotrix URL is too large to decode safely.');
+	}
+
 	const binary = atob(padded);
 	const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
 	return new TextDecoder().decode(bytes);
+}
+
+function clampRegressionResults(input: unknown): RegressionResult[] {
+	if (!Array.isArray(input)) {
+		return [];
+	}
+
+	return input
+		.slice(0, MAX_REGRESSION_RESULTS)
+		.filter((entry): entry is RegressionResult => {
+			if (!entry || typeof entry !== 'object') {
+				return false;
+			}
+
+			const result = entry as Partial<RegressionResult>;
+			return (
+				typeof result.model === 'string' &&
+				typeof result.equation === 'string' &&
+				typeof result.latex === 'string' &&
+				Array.isArray(result.coefficients) &&
+				result.coefficients.every((value) => typeof value === 'number' && Number.isFinite(value))
+			);
+		})
+		.map((result) => ({
+			...result,
+			coefficients: result.coefficients.slice(0, 12),
+			metrics: {
+				r2: asFiniteNumber(result.metrics?.r2, 0, -1, 1),
+				rmse: asFiniteNumber(result.metrics?.rmse, 0, 0, 1e12),
+				mae: asFiniteNumber(result.metrics?.mae, 0, 0, 1e12)
+			}
+		}));
 }
 
 function cloneSettings(settings: GraphSettings): GraphSettings {
@@ -222,7 +260,9 @@ function validateSettings(input: unknown): GraphSettings {
 
 	return {
 		...DEFAULT_SETTINGS,
-		theme: ALLOWED_THEMES.has(value.theme as GraphSettings['theme']) ? (value.theme as GraphSettings['theme']) : DEFAULT_SETTINGS.theme,
+		theme: ALLOWED_THEMES.has(value.theme as GraphSettings['theme'])
+			? (value.theme as GraphSettings['theme'])
+			: DEFAULT_SETTINGS.theme,
 		gridStyle: ALLOWED_GRID_STYLES.has(value.gridStyle as GraphSettings['gridStyle'])
 			? (value.gridStyle as GraphSettings['gridStyle'])
 			: DEFAULT_SETTINGS.gridStyle,
@@ -233,13 +273,26 @@ function validateSettings(input: unknown): GraphSettings {
 		showRenderTime: Boolean(value.showRenderTime ?? DEFAULT_SETTINGS.showRenderTime),
 		highDPI: Boolean(value.highDPI ?? DEFAULT_SETTINGS.highDPI),
 		antialiasing: Boolean(value.antialiasing ?? DEFAULT_SETTINGS.antialiasing),
-		backgroundColor: typeof value.backgroundColor === 'string' ? value.backgroundColor : DEFAULT_SETTINGS.backgroundColor,
+		backgroundColor:
+			typeof value.backgroundColor === 'string'
+				? value.backgroundColor
+				: DEFAULT_SETTINGS.backgroundColor,
 		axisColor: typeof value.axisColor === 'string' ? value.axisColor : DEFAULT_SETTINGS.axisColor,
-		equationPanelWidth: asFiniteNumber(value.equationPanelWidth, DEFAULT_SETTINGS.equationPanelWidth, 300, 520),
+		equationPanelWidth: asFiniteNumber(
+			value.equationPanelWidth,
+			DEFAULT_SETTINGS.equationPanelWidth,
+			300,
+			520
+		),
 		labelSize: asFiniteNumber(value.labelSize, DEFAULT_SETTINGS.labelSize, 10, 18),
 		snapToGrid: Boolean(value.snapToGrid ?? DEFAULT_SETTINGS.snapToGrid),
 		traceMode: Boolean(value.traceMode ?? DEFAULT_SETTINGS.traceMode),
-		animationSpeed: asFiniteNumber(value.animationSpeed, DEFAULT_SETTINGS.animationSpeed, 0.25, 2.5),
+		animationSpeed: asFiniteNumber(
+			value.animationSpeed,
+			DEFAULT_SETTINGS.animationSpeed,
+			0.25,
+			2.5
+		),
 		showCriticalPoints: Boolean(value.showCriticalPoints ?? DEFAULT_SETTINGS.showCriticalPoints),
 		showIntersections: Boolean(value.showIntersections ?? DEFAULT_SETTINGS.showIntersections)
 	};
@@ -263,7 +316,10 @@ function validateEquations(input: unknown): GraphSnapshot['equations'] {
 			id: typeof equation.id === 'string' ? equation.id : nanoid(),
 			raw: equation.raw,
 			kind,
-			color: typeof equation.color === 'string' ? equation.color : COLOR_PALETTE[index % COLOR_PALETTE.length]!,
+			color:
+				typeof equation.color === 'string'
+					? equation.color
+					: COLOR_PALETTE[index % COLOR_PALETTE.length]!,
 			lineWidth: asFiniteNumber(equation.lineWidth, 2.4, 1.5, 6),
 			lineStyle: ALLOWED_LINE_STYLES.has(equation.lineStyle) ? equation.lineStyle : 'solid',
 			opacity: asFiniteNumber(equation.opacity, 1, 0.1, 1),
@@ -307,23 +363,31 @@ function validateDataSeries(input: unknown): DataSeries[] {
 		return [defaultDataSeries(0)];
 	}
 
-	return input.slice(0, 12).map((entry, index) => {
+	let totalCells = 0;
+
+	return input.slice(0, MAX_DATA_SERIES).map((entry, index) => {
 		const value = (entry && typeof entry === 'object' ? entry : {}) as Partial<DataSeries>;
 		const base = defaultDataSeries(index);
-		const columns = Array.isArray(value.columns) && value.columns.length
-			? value.columns.slice(0, 8).map((column, columnIndex) => ({
-					id: typeof column?.id === 'string' ? column.id : nanoid(),
-					name: typeof column?.name === 'string' ? column.name.slice(0, 32) || `Col ${columnIndex + 1}` : `Col ${columnIndex + 1}`,
-					width: asFiniteNumber(column?.width, 120, 72, 240)
-				}))
-			: base.columns;
+		const columns =
+			Array.isArray(value.columns) && value.columns.length
+				? value.columns.slice(0, MAX_DATA_COLUMNS).map((column, columnIndex) => ({
+						id: typeof column?.id === 'string' ? column.id : nanoid(),
+						name:
+							typeof column?.name === 'string'
+								? column.name.slice(0, 32) || `Col ${columnIndex + 1}`
+								: `Col ${columnIndex + 1}`,
+						width: asFiniteNumber(column?.width, 120, 72, 240)
+					}))
+				: base.columns;
 		const rows = Array.isArray(value.rows)
-			? value.rows.slice(0, 2000).map((row) =>
+			? value.rows.slice(0, MAX_DATA_ROWS).map((row) =>
 					Array.from({ length: columns.length }, (_, columnIndex) => {
+						totalCells += 1;
+						if (totalCells > MAX_IMPORT_CELLS) return '';
 						const cell = Array.isArray(row) ? row[columnIndex] : '';
 						if (typeof cell !== 'string') return '';
 						const numeric = Number(cell);
-						return Number.isFinite(numeric) ? `${numeric}` : '';
+						return Number.isFinite(numeric) ? `${numeric}`.slice(0, MAX_CELL_CHARS) : '';
 					})
 				)
 			: base.rows;
@@ -477,11 +541,16 @@ function createSnapshot(graph: {
 }
 
 function deserializeSnapshot(source: string): GraphSnapshot {
-	const payload = source.trim().startsWith('{')
-		? source
-		: source.includes('plotrix=')
-			? base64UrlDecode(source.split('plotrix=')[1] ?? '')
-			: base64UrlDecode(source.replace(/^#/, ''));
+	const trimmed = source.trim();
+	let payload = trimmed;
+
+	try {
+		JSON.parse(trimmed);
+	} catch {
+		payload = trimmed.includes('plotrix=')
+			? base64UrlDecode(trimmed.split('plotrix=')[1] ?? '')
+			: base64UrlDecode(trimmed.replace(/^#/, ''));
+	}
 
 	let parsed: GraphSnapshot | { version: 1; [key: string]: unknown };
 
@@ -491,7 +560,10 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 		throw new Error('Invalid Plotrix snapshot JSON.');
 	}
 
-	if ((parsed as GraphSnapshot).version === 2 && Array.isArray((parsed as GraphSnapshot).equations)) {
+	if (
+		(parsed as GraphSnapshot).version === 2 &&
+		Array.isArray((parsed as GraphSnapshot).equations)
+	) {
 		const snapshot = parsed as GraphSnapshot;
 		return {
 			version: 2,
@@ -505,11 +577,14 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 			settings: validateSettings(snapshot.settings),
 			variables: validateVariables(snapshot.variables),
 			dataSeries: validateDataSeries(snapshot.dataSeries),
-			regressionResults: Array.isArray(snapshot.regressionResults) ? snapshot.regressionResults : []
+			regressionResults: clampRegressionResults(snapshot.regressionResults)
 		};
 	}
 
-	if ((parsed as { version: 1 }).version === 1 && Array.isArray((parsed as { equations: unknown[] }).equations)) {
+	if (
+		(parsed as { version: 1 }).version === 1 &&
+		Array.isArray((parsed as { equations: unknown[] }).equations)
+	) {
 		const legacy = parsed as {
 			version: 1;
 			equations: Array<{
@@ -560,7 +635,7 @@ export function createGraphState() {
 		viewport: { width: 0, height: 0 },
 		variables: [] as Variable[],
 		dataSeries: [defaultDataSeries(0)] as DataSeries[],
-		analysisCache: new Map<string, EquationAnalysis>(),
+		analysisCache: new LruMap<string, EquationAnalysis>(MAX_ANALYSIS_CACHE_ENTRIES),
 		regressionResults: [] as RegressionResult[],
 		historyIndex: 0,
 		historySize: 0
@@ -571,13 +646,21 @@ export function createGraphState() {
 	let lastHistoryJson = '';
 	let pendingHistoryTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastHistoryMeta: { kind: string; target: string; at: number } | null = null;
-	const criticalPointCache = new Map<string, CriticalPoint[]>();
-	const intersectionCache = new Map<string, IntersectionPoint[]>();
+	const criticalPointCache = new LruMap<string, CriticalPoint[]>(MAX_ANALYSIS_CACHE_ENTRIES);
+	const intersectionCache = new LruMap<string, IntersectionPoint[]>(MAX_ANALYSIS_CACHE_ENTRIES);
 	const pendingAnalysisRequests = new Set<string>();
 	const pendingIntersectionRequests = new Set<string>();
+	const pendingFitRequests = new Map<
+		string,
+		{
+			recordHistory: boolean;
+			dataBounds: { minX: number; maxX: number; minY: number; maxY: number } | null;
+		}
+	>();
+	const analysisFailures = new Set<string>();
 	let analysisWorker: Worker | null = null;
 	let memoizedVariableScope: Record<string, number> = {};
-	let lastVariableScopeKey = '';
+	let lastVariableSnapshot = [] as Array<{ name: string; value: number }>;
 
 	function ensureAnalysisWorker(): Worker | null {
 		if (analysisWorker || typeof window === 'undefined' || typeof Worker === 'undefined') {
@@ -597,14 +680,20 @@ export function createGraphState() {
 
 			if (data.type === 'criticalPoints') {
 				pendingAnalysisRequests.delete(data.key);
-				criticalPointCache.set(data.key, Array.isArray(data.result) ? (data.result as CriticalPoint[]) : []);
+				criticalPointCache.set(
+					data.key,
+					Array.isArray(data.result) ? (data.result as CriticalPoint[]) : []
+				);
 				exporter?.requestRender?.();
 				return;
 			}
 
 			if (data.type === 'intersections') {
 				pendingIntersectionRequests.delete(data.key);
-				intersectionCache.set(data.key, Array.isArray(data.result) ? (data.result as IntersectionPoint[]) : []);
+				intersectionCache.set(
+					data.key,
+					Array.isArray(data.result) ? (data.result as IntersectionPoint[]) : []
+				);
 				exporter?.requestRender?.();
 				return;
 			}
@@ -612,8 +701,44 @@ export function createGraphState() {
 			if (data.type === 'equationAnalysis') {
 				pendingAnalysisRequests.delete(data.key);
 				if (data.result) {
+					analysisFailures.delete(data.key);
 					graph.analysisCache.set(data.key, data.result as EquationAnalysis);
 					exporter?.requestRender?.();
+				} else {
+					analysisFailures.add(data.key);
+				}
+				return;
+			}
+
+			if (data.type === 'fitBounds') {
+				const pendingFit = pendingFitRequests.get(data.key) ?? null;
+				pendingFitRequests.delete(data.key);
+				const bounds = data.result as
+					| { minX: number; maxX: number; minY: number; maxY: number }
+					| null
+					| undefined;
+
+				if (!bounds && !pendingFit?.dataBounds) {
+					return;
+				}
+
+				const combined =
+					bounds && pendingFit?.dataBounds
+						? {
+								minX: Math.min(bounds.minX, pendingFit.dataBounds.minX),
+								maxX: Math.max(bounds.maxX, pendingFit.dataBounds.maxX),
+								minY: Math.min(bounds.minY, pendingFit.dataBounds.minY),
+								maxY: Math.max(bounds.maxY, pendingFit.dataBounds.maxY)
+							}
+						: (bounds ?? pendingFit?.dataBounds);
+
+				if (!combined) {
+					return;
+				}
+
+				applyFitBounds(combined);
+				if (pendingFit?.recordHistory) {
+					commitHistory('view', 'fit');
 				}
 			}
 		};
@@ -626,16 +751,59 @@ export function createGraphState() {
 	}
 
 	function variableScope(): Record<string, number> {
-		const nextKey = graph.variables.map((variable) => `${variable.name}:${variable.value}`).join('|');
+		const nextSnapshot = graph.variables.map((variable) => ({
+			name: variable.name,
+			value: variable.value
+		}));
+		const changed =
+			nextSnapshot.length !== lastVariableSnapshot.length ||
+			nextSnapshot.some((entry, index) => {
+				const previous = lastVariableSnapshot[index];
+				return previous?.name !== entry.name || previous.value !== entry.value;
+			});
 
-		if (nextKey !== lastVariableScopeKey) {
-			lastVariableScopeKey = nextKey;
+		if (changed) {
+			lastVariableSnapshot = nextSnapshot;
 			memoizedVariableScope = Object.fromEntries(
-				graph.variables.map((variable) => [variable.name, variable.value])
+				nextSnapshot.map((variable) => [variable.name, variable.value])
 			);
 		}
 
 		return memoizedVariableScope;
+	}
+
+	function applyFitBounds(bounds: {
+		minX: number;
+		maxX: number;
+		minY: number;
+		maxY: number;
+	}): void {
+		if (
+			!Number.isFinite(bounds.minX) ||
+			!Number.isFinite(bounds.maxX) ||
+			!Number.isFinite(bounds.minY) ||
+			!Number.isFinite(bounds.maxY)
+		) {
+			resetView(false);
+			return;
+		}
+
+		const spanX = Math.max(2, bounds.maxX - bounds.minX);
+		const spanY = Math.max(2, bounds.maxY - bounds.minY);
+		const paddingX = spanX * 0.16;
+		const paddingY = spanY * 0.18;
+		const width = Math.max(320, graph.viewport.width || 1280);
+		const height = Math.max(240, graph.viewport.height || 720);
+		const scaleX = width / (spanX + paddingX * 2);
+		const scaleY = height / (spanY + paddingY * 2);
+		const centerX = (bounds.minX + bounds.maxX) / 2;
+		const centerY = (bounds.minY + bounds.maxY) / 2;
+
+		graph.view.scaleX = clamp(scaleX, MIN_ZOOM, MAX_ZOOM);
+		graph.view.scaleY = clamp(scaleY, MIN_ZOOM, MAX_ZOOM);
+		graph.view.originX = width / 2 - centerX * graph.view.scaleX;
+		graph.view.originY = height / 2 + centerY * graph.view.scaleY;
+		bumpRenderVersion(false);
 	}
 
 	function viewportHash(): string {
@@ -672,17 +840,25 @@ export function createGraphState() {
 		intersectionCache.clear();
 		pendingAnalysisRequests.clear();
 		pendingIntersectionRequests.clear();
+		analysisFailures.clear();
 	}
 
 	function clearEquationAnalysisCache(raw?: string): void {
 		if (!raw) {
 			graph.analysisCache.clear();
+			analysisFailures.clear();
 			return;
 		}
 
 		for (const key of graph.analysisCache.keys()) {
 			if (key.includes(`:${raw}:`) || key.endsWith(`:${raw}`)) {
 				graph.analysisCache.delete(key);
+			}
+		}
+
+		for (const key of [...analysisFailures]) {
+			if (key.includes(`:${raw}:`) || key.endsWith(`:${raw}`)) {
+				analysisFailures.delete(key);
 			}
 		}
 	}
@@ -740,7 +916,7 @@ export function createGraphState() {
 			history = history.slice(0, graph.historyIndex + 1);
 			history.push(snapshot);
 
-			if (history.length > 50) {
+			if (history.length > MAX_HISTORY_ENTRIES) {
 				history.shift();
 			}
 
@@ -767,24 +943,33 @@ export function createGraphState() {
 
 	function restoreSnapshot(snapshot: GraphSnapshot): void {
 		const restoredEquations = snapshot.equations.map((equation, index) =>
-			createEquation(equation.raw, equation.color || nextColor(index), equation as Partial<PlotEquation>)
+			createEquation(
+				equation.raw,
+				equation.color || nextColor(index),
+				equation as Partial<PlotEquation>
+			)
 		);
 
 		graph.equations.splice(0, graph.equations.length, ...restoredEquations);
 		graph.variables.splice(
 			0,
 			graph.variables.length,
-			...(snapshot.variables?.map((variable) => ({ ...createDefaultVariable(variable.name), ...variable })) ?? [])
+			...(snapshot.variables?.map((variable) => ({
+				...createDefaultVariable(variable.name),
+				...variable
+			})) ?? [])
 		);
 		graph.dataSeries.splice(
 			0,
 			graph.dataSeries.length,
-			...((snapshot.dataSeries?.length ? snapshot.dataSeries : [defaultDataSeries(0)]).map((series) => ({
-				...series,
-				columns: series.columns.map((column) => ({ ...column })),
-				rows: series.rows.map((row) => [...row]),
-				style: { ...series.style }
-			})))
+			...(snapshot.dataSeries?.length ? snapshot.dataSeries : [defaultDataSeries(0)]).map(
+				(series) => ({
+					...series,
+					columns: series.columns.map((column) => ({ ...column })),
+					rows: series.rows.map((row) => [...row]),
+					style: { ...series.style }
+				})
+			)
 		);
 		graph.regressionResults.splice(
 			0,
@@ -795,7 +980,7 @@ export function createGraphState() {
 		Object.assign(graph.view, snapshot.view, { isPanning: false, isAnimating: false });
 		Object.assign(graph.settings, { ...DEFAULT_SETTINGS, ...snapshot.settings });
 		syncVariables();
-		lastVariableScopeKey = '';
+		lastVariableSnapshot = [];
 		bumpRenderVersion(true);
 		lastHistoryJson = JSON.stringify(snapshot);
 	}
@@ -804,7 +989,7 @@ export function createGraphState() {
 		const equation = createEquation(raw, nextColor(), { kind });
 		graph.equations.push(equation);
 		syncVariables();
-		lastVariableScopeKey = '';
+		lastVariableSnapshot = [];
 		bumpRenderVersion(true);
 		commitHistory('equations', equation.id);
 		return equation;
@@ -819,7 +1004,7 @@ export function createGraphState() {
 
 		graph.equations.splice(index, 1);
 		syncVariables();
-		lastVariableScopeKey = '';
+		lastVariableSnapshot = [];
 		bumpRenderVersion(true);
 		commitHistory('equations', id);
 	}
@@ -872,7 +1057,7 @@ export function createGraphState() {
 		if (mathChanged) {
 			clearEquationAnalysisCache(current.raw);
 			clearEquationAnalysisCache(next.raw);
-			lastVariableScopeKey = '';
+			lastVariableSnapshot = [];
 		}
 		bumpRenderVersion(mathChanged);
 		queueHistory('equation-edit', id, patch.raw !== undefined ? 280 : 180);
@@ -894,7 +1079,7 @@ export function createGraphState() {
 
 		graph.equations.splice(index + 1, 0, duplicate);
 		syncVariables();
-		lastVariableScopeKey = '';
+		lastVariableSnapshot = [];
 		bumpRenderVersion(true);
 		commitHistory('equations', duplicate.id);
 	}
@@ -998,36 +1183,43 @@ export function createGraphState() {
 			resetView(recordHistory);
 			return;
 		}
+		const scope = variableScope();
+		const fitKey = `fit:${visibleEquations.map((equation) => equation.id).join(',')}:${Object.values(scope).join(':')}:${graph.viewport.width}:${graph.viewport.height}`;
+		const worker = ensureAnalysisWorker();
 
-		const probeHalfWidth = Math.max(
-			12,
-			(graph.viewport.width || 1280) / Math.max(graph.view.scaleX, DEFAULT_VIEW.scaleX) / 2
-		);
+		let dataBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
+
+		if (worker && !pendingFitRequests.has(fitKey)) {
+			pendingFitRequests.set(fitKey, {
+				recordHistory,
+				dataBounds: null
+			});
+			worker.postMessage({
+				type: 'fitBounds',
+				key: fitKey,
+				equations: visibleEquations.map((equation) => ({
+					id: equation.id,
+					kind: equation.kind,
+					raw: equation.raw,
+					color: equation.color,
+					paramRange: [...equation.paramRange] as [number, number]
+				})),
+				variables: scope,
+				viewport: {
+					originX: graph.view.originX,
+					originY: graph.view.originY,
+					scaleX: graph.view.scaleX,
+					scaleY: graph.view.scaleY,
+					width: graph.viewport.width,
+					height: graph.viewport.height
+				}
+			});
+		}
+
 		let minX = Number.POSITIVE_INFINITY;
 		let maxX = Number.NEGATIVE_INFINITY;
 		let minY = Number.POSITIVE_INFINITY;
 		let maxY = Number.NEGATIVE_INFINITY;
-		const scope = variableScope();
-
-		for (const equation of visibleEquations) {
-			const segments = sampleEquation(equation, -probeHalfWidth, probeHalfWidth, 96, 700, scope);
-
-			for (const segment of segments) {
-				for (let index = 0; index < segment.length; index += 2) {
-					const x = segment[index]!;
-					const y = segment[index + 1]!;
-
-					if (!Number.isFinite(x) || !Number.isFinite(y)) {
-						continue;
-					}
-
-					minX = Math.min(minX, x);
-					maxX = Math.max(maxX, x);
-					minY = Math.min(minY, y);
-					maxY = Math.max(maxY, y);
-				}
-			}
-		}
 
 		for (const series of graph.dataSeries.filter((entry) => entry.plotted && entry.visible)) {
 			for (const row of series.rows) {
@@ -1045,27 +1237,29 @@ export function createGraphState() {
 			}
 		}
 
-		if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
-			resetView(recordHistory);
+		if (
+			!Number.isFinite(minX) ||
+			!Number.isFinite(minY) ||
+			!Number.isFinite(maxX) ||
+			!Number.isFinite(maxY)
+		) {
+			if (!worker) {
+				resetView(recordHistory);
+			}
 			return;
 		}
 
-		const spanX = Math.max(2, maxX - minX);
-		const spanY = Math.max(2, maxY - minY);
-		const paddingX = spanX * 0.16;
-		const paddingY = spanY * 0.18;
-		const width = Math.max(320, graph.viewport.width || 1280);
-		const height = Math.max(240, graph.viewport.height || 720);
-		const scaleX = width / (spanX + paddingX * 2);
-		const scaleY = height / (spanY + paddingY * 2);
-		const centerX = (minX + maxX) / 2;
-		const centerY = (minY + maxY) / 2;
+		dataBounds = { minX, maxX, minY, maxY };
 
-		graph.view.scaleX = clamp(scaleX, MIN_ZOOM, MAX_ZOOM);
-		graph.view.scaleY = clamp(scaleY, MIN_ZOOM, MAX_ZOOM);
-		graph.view.originX = width / 2 - centerX * graph.view.scaleX;
-		graph.view.originY = height / 2 + centerY * graph.view.scaleY;
-		bumpRenderVersion(false);
+		if (worker) {
+			pendingFitRequests.set(fitKey, {
+				recordHistory,
+				dataBounds
+			});
+			return;
+		}
+
+		applyFitBounds(dataBounds);
 
 		if (recordHistory) {
 			commitHistory('view', 'fit');
@@ -1093,7 +1287,7 @@ export function createGraphState() {
 		variable.max = Math.max(variable.min, variable.max);
 		variable.step = Math.max(1e-6, Math.abs(variable.step));
 		variable.value = clamp(variable.value, variable.min, variable.max);
-		lastVariableScopeKey = '';
+		lastVariableSnapshot = [];
 		bumpRenderVersion(true);
 		queueHistory('variables', name, 120);
 	}
@@ -1143,7 +1337,8 @@ export function createGraphState() {
 	}
 
 	function upsertRegressionResult(result: RegressionResult): void {
-		graph.regressionResults.push(result);
+		graph.regressionResults.unshift(result);
+		graph.regressionResults.splice(MAX_REGRESSION_RESULTS);
 		queueHistory('regression', result.model, 120);
 	}
 
@@ -1153,10 +1348,6 @@ export function createGraphState() {
 	}
 
 	function setEquationRenderTime(id: string, renderTimeMs: number): void {
-		if (!graph.settings.showRenderTime) {
-			return;
-		}
-
 		const equation = graph.equations.find((entry) => entry.id === id);
 
 		if (!equation) {
@@ -1303,6 +1494,18 @@ export function createGraphState() {
 		return null;
 	}
 
+	function hasEquationAnalysisFailure(equationId: string): boolean {
+		const equation = graph.equations.find((entry) => entry.id === equationId);
+
+		if (!equation || equation.kind !== 'cartesian') {
+			return true;
+		}
+
+		const scope = variableScope();
+		const cacheKey = `${equation.kind}:${equation.raw}:${analysisViewportBucket()}:${Object.values(scope).join(':')}`;
+		return analysisFailures.has(cacheKey);
+	}
+
 	async function exportPNG(scale: 1 | 2 | 3): Promise<Blob | null> {
 		return exporter ? exporter.toPNGBlob(scale) : null;
 	}
@@ -1316,6 +1519,10 @@ export function createGraphState() {
 	}
 
 	function importJSON(json: string): void {
+		if (json.length > MAX_URL_SNAPSHOT_BYTES * 8) {
+			throw new Error('Imported Plotrix snapshot exceeds the supported size limit.');
+		}
+
 		let snapshot: GraphSnapshot;
 		try {
 			snapshot = deserializeSnapshot(json);
@@ -1335,6 +1542,11 @@ export function createGraphState() {
 		}
 
 		const encoded = base64UrlEncode(exportJSON());
+
+		if (encoded.length > MAX_URL_SNAPSHOT_BYTES * 2) {
+			throw new Error('Plotrix snapshot is too large to share as a URL. Export JSON instead.');
+		}
+
 		const url = `${window.location.origin}${window.location.pathname}#plotrix=${encoded}`;
 		window.history.replaceState(null, '', `#plotrix=${encoded}`);
 		return url;
@@ -1366,6 +1578,15 @@ export function createGraphState() {
 		exporter = next;
 	}
 
+	function destroy(): void {
+		clearPendingHistory();
+		pendingAnalysisRequests.clear();
+		pendingIntersectionRequests.clear();
+		pendingFitRequests.clear();
+		analysisWorker?.terminate();
+		analysisWorker = null;
+	}
+
 	function seedStarterEquations(): void {
 		if (graph.equations.length) {
 			return;
@@ -1376,13 +1597,13 @@ export function createGraphState() {
 		}
 
 		syncVariables();
-		lastVariableScopeKey = '';
+		lastVariableSnapshot = [];
 		resetView(false);
 		commitHistory('bootstrap', 'initial');
 	}
 
 	syncVariables();
-	lastVariableScopeKey = '';
+	lastVariableSnapshot = [];
 	resetView(false);
 	commitHistory('bootstrap', 'initial');
 
@@ -1409,8 +1630,10 @@ export function createGraphState() {
 		getCriticalPoints,
 		getIntersections,
 		getEquationAnalysis,
+		hasEquationAnalysisFailure,
 		variableScope,
 		attachExporter,
+		destroy,
 		seedStarterEquations,
 		exportPNG,
 		exportSVG,

@@ -39,8 +39,19 @@ self.onmessage = (event: MessageEvent<unknown>) => {
 		{ x: Array.from(request.x), y: Array.from(request.y) },
 		options
 	);
+	const coefficients = new Float64Array(result.coefficients);
 
-	self.postMessage({ type: 'fit', key: request.key, result });
+	self.postMessage(
+		{
+			type: 'fit',
+			key: request.key,
+			result: {
+				...result,
+				coefficients
+			}
+		},
+		[coefficients.buffer]
+	);
 };
 
 export {};

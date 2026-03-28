@@ -205,8 +205,11 @@ function transformedLinearRegression(
 }
 
 function exponentialRegression(dataset: RegressionDataset): RegressionResult {
-	const transformed = transformedLinearRegression(dataset.x, dataset.y, (value) => value, (value) =>
-		value > 0 ? Math.log(value) : null
+	const transformed = transformedLinearRegression(
+		dataset.x,
+		dataset.y,
+		(value) => value,
+		(value) => (value > 0 ? Math.log(value) : null)
 	);
 	const a = Math.exp(transformed.intercept);
 	const b = transformed.slope;
@@ -274,52 +277,6 @@ function estimateFrequency(x: number[], y: number[]): number {
 	return Math.max(1e-3, (zeroCrossings / 2) * ((2 * Math.PI) / span));
 }
 
-function sinusoidalRegression(dataset: RegressionDataset): RegressionResult {
-	const { x, y } = dataset;
-	const yMax = Math.max(...y);
-	const yMin = Math.min(...y);
-	let a = (yMax - yMin) / 2;
-	let d = (yMax + yMin) / 2;
-	let b = estimateFrequency(x, y.map((value) => value - d));
-	let c = 0;
-	let velocity = [0, 0, 0, 0];
-
-	for (let iteration = 0; iteration < 500; iteration += 1) {
-		let gradA = 0;
-		let gradB = 0;
-		let gradC = 0;
-		let gradD = 0;
-
-		for (let index = 0; index < x.length; index += 1) {
-			const angle = b * x[index]! + c;
-			const prediction = a * Math.sin(angle) + d;
-			const error = prediction - y[index]!;
-			gradA += 2 * error * Math.sin(angle);
-			gradB += 2 * error * a * Math.cos(angle) * x[index]!;
-			gradC += 2 * error * a * Math.cos(angle);
-			gradD += 2 * error;
-		}
-
-		const lr = 1e-4 / Math.max(1, x.length);
-		const gradients = [gradA, gradB, gradC, gradD];
-		velocity = velocity.map((value, index) => value * 0.9 - gradients[index]! * lr);
-		a += velocity[0]!;
-		b += velocity[1]!;
-		c += velocity[2]!;
-		d += velocity[3]!;
-	}
-
-	const predicted = x.map((value) => a * Math.sin(b * value + c) + d);
-
-	return {
-		model: 'sinusoidal',
-		equation: `y = ${a.toPrecision(6)} * sin(${b.toPrecision(6)} * x + ${c.toPrecision(6)}) + ${d.toPrecision(6)}`,
-		latex: `y = ${a.toPrecision(4)}\\sin(${b.toPrecision(4)}x + ${c.toPrecision(4)}) + ${d.toPrecision(4)}`,
-		metrics: computeMetrics(y, predicted),
-		coefficients: [a, b, c, d]
-	};
-}
-
 function matrixMultiplyTransposeJ(jacobian: number[][]): number[][] {
 	const columns = jacobian[0]?.length ?? 0;
 	const matrix = Array.from({ length: columns }, () => Array(columns).fill(0));
@@ -348,29 +305,49 @@ function matrixVectorMultiplyTranspose(jacobian: number[][], residuals: number[]
 	return vector;
 }
 
-function customRegression(dataset: RegressionDataset, expression: string): RegressionResult {
-	const parsed = math.parse(expression);
-	const symbols = new Set<string>();
-	parsed.traverse((node, path, parent) => {
-		if (node.type === 'SymbolNode') {
-			const name = String((node as unknown as { name: string }).name);
+const SAFE_REGRESSION_PARAM = /^[a-wyz]$/;
+const BLOCKED_PARAM_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
-			if (name !== 'x' && name.length === 1 && parent?.type !== 'FunctionNode') {
-				symbols.add(name);
-			}
+function createSafeScope(params: Record<string, number>, x: number): Record<string, number> {
+	const scope = Object.create(null) as Record<string, number>;
+	scope.x = x;
+
+	for (const [key, value] of Object.entries(params)) {
+		if (
+			!SAFE_REGRESSION_PARAM.test(key) ||
+			BLOCKED_PARAM_NAMES.has(key) ||
+			!Number.isFinite(value)
+		) {
+			continue;
 		}
-	});
-	const names = [...symbols].sort();
-	const compiled = parsed.compile();
-	let params = Object.fromEntries(names.map((name, index) => [name, index === 0 ? 1 : 0]));
+
+		scope[key] = value;
+	}
+
+	return scope;
+}
+
+function fitNonlinearLeastSquares(
+	dataset: RegressionDataset,
+	names: string[],
+	initialValues: Record<string, number>,
+	evaluate: (params: Record<string, number>, x: number) => number | null
+): { params: Record<string, number>; predicted: number[] } {
+	let params = { ...initialValues };
 	let lambda = 0.01;
+	let lastError = Number.POSITIVE_INFINITY;
 
 	const rss = (candidate: Record<string, number>): { value: number; predicted: number[] } => {
 		let value = 0;
 		const predicted: number[] = [];
 
 		for (let index = 0; index < dataset.x.length; index += 1) {
-			const output = Number(compiled.evaluate({ ...candidate, x: dataset.x[index]! }));
+			const output = evaluate(candidate, dataset.x[index]!);
+
+			if (output === null || !Number.isFinite(output)) {
+				return { value: Number.POSITIVE_INFINITY, predicted: [] };
+			}
+
 			const error = dataset.y[index]! - output;
 			value += error * error;
 			predicted.push(output);
@@ -379,8 +356,13 @@ function customRegression(dataset: RegressionDataset, expression: string): Regre
 		return { value, predicted };
 	};
 
-	for (let iteration = 0; iteration < 200; iteration += 1) {
+	for (let iteration = 0; iteration < 120; iteration += 1) {
 		const base = rss(params);
+
+		if (!Number.isFinite(base.value)) {
+			break;
+		}
+
 		const residuals = dataset.y.map((value, index) => value - base.predicted[index]!);
 		const jacobian: number[][] = [];
 
@@ -388,12 +370,16 @@ function customRegression(dataset: RegressionDataset, expression: string): Regre
 			const grads: number[] = [];
 
 			for (const name of names) {
-				const step = 1e-5;
-				const forward = { ...params, [name]: params[name]! + step };
-				const backward = { ...params, [name]: params[name]! - step };
-				const y1 = Number(compiled.evaluate({ ...forward, x: dataset.x[row]! }));
-				const y0 = Number(compiled.evaluate({ ...backward, x: dataset.x[row]! }));
-				grads.push((y1 - y0) / (2 * step));
+				const step = Math.max(1e-6, Math.abs(params[name] ?? 0) * 1e-4);
+				const forward = { ...params, [name]: (params[name] ?? 0) + step };
+				const backward = { ...params, [name]: (params[name] ?? 0) - step };
+				const y1 = evaluate(forward, dataset.x[row]!);
+				const y0 = evaluate(backward, dataset.x[row]!);
+				grads.push(
+					y1 === null || y0 === null || !Number.isFinite(y1) || !Number.isFinite(y0)
+						? 0
+						: (y1 - y0) / (2 * step)
+				);
 			}
 
 			jacobian.push(grads);
@@ -417,19 +403,95 @@ function customRegression(dataset: RegressionDataset, expression: string): Regre
 
 		if (trial.value < base.value) {
 			params = next;
-			lambda *= 0.5;
+			lambda *= 0.55;
 
-			if (Math.hypot(...delta) < 1e-10) {
-				break;
+			if (Math.abs(lastError - trial.value) < 1e-9 || Math.hypot(...delta) < 1e-7) {
+				return { params, predicted: trial.predicted };
 			}
-		} else {
-			lambda *= 2;
+
+			lastError = trial.value;
+			continue;
 		}
+
+		lambda *= 2.2;
 	}
 
 	const final = rss(params);
+	return { params, predicted: final.predicted };
+}
+
+function sinusoidalRegression(dataset: RegressionDataset): RegressionResult {
+	const { x, y } = dataset;
+	const yMax = Math.max(...y);
+	const yMin = Math.min(...y);
+	const initialOffset = (yMax + yMin) / 2;
+	const initialValues = {
+		a: (yMax - yMin) / 2 || 1,
+		b: estimateFrequency(
+			x,
+			y.map((value) => value - initialOffset)
+		),
+		c: 0,
+		d: initialOffset
+	};
+	const fit = fitNonlinearLeastSquares(
+		dataset,
+		['a', 'b', 'c', 'd'],
+		initialValues,
+		(params, sampleX) =>
+			(params.a ?? initialValues.a) *
+				Math.sin((params.b ?? initialValues.b) * sampleX + (params.c ?? initialValues.c)) +
+			(params.d ?? initialValues.d)
+	);
+	const a = fit.params.a ?? initialValues.a;
+	const b = fit.params.b ?? initialValues.b;
+	const c = fit.params.c ?? initialValues.c;
+	const d = fit.params.d ?? initialValues.d;
+
+	return {
+		model: 'sinusoidal',
+		equation: `y = ${a.toPrecision(6)} * sin(${b.toPrecision(6)} * x + ${c.toPrecision(6)}) + ${d.toPrecision(6)}`,
+		latex: `y = ${a.toPrecision(4)}\\sin(${b.toPrecision(4)}x + ${c.toPrecision(4)}) + ${d.toPrecision(4)}`,
+		metrics: computeMetrics(y, fit.predicted),
+		coefficients: [a, b, c, d]
+	};
+}
+
+function customRegression(dataset: RegressionDataset, expression: string): RegressionResult {
+	const parsed = math.parse(expression);
+	const symbols = new Set<string>();
+
+	parsed.traverse((node, path, parent) => {
+		if (node.type !== 'SymbolNode') {
+			return;
+		}
+
+		const name = String((node as unknown as { name: string }).name);
+
+		if (parent?.type === 'FunctionNode' && path === 'fn') {
+			return;
+		}
+
+		if (name === 'x') {
+			return;
+		}
+
+		if (!SAFE_REGRESSION_PARAM.test(name) || BLOCKED_PARAM_NAMES.has(name)) {
+			throw new Error(`Unsupported parameter "${name}". Use single-letter names like a, b, c.`);
+		}
+
+		symbols.add(name);
+	});
+
+	const names = [...symbols].sort();
+	const compiled = parsed.compile();
+	const initialValues = Object.fromEntries(names.map((name, index) => [name, index === 0 ? 1 : 0]));
+	const fit = fitNonlinearLeastSquares(dataset, names, initialValues, (params, sampleX) => {
+		const output = Number(compiled.evaluate(createSafeScope(params, sampleX)));
+		return Number.isFinite(output) ? output : null;
+	});
 	const substituted = names.reduce(
-		(source, name) => source.replaceAll(name, `(${params[name]!.toPrecision(6)})`),
+		(source, name) => source.replaceAll(name, `(${fit.params[name]!.toPrecision(6)})`),
 		expression
 	);
 
@@ -437,9 +499,9 @@ function customRegression(dataset: RegressionDataset, expression: string): Regre
 		model: 'custom',
 		equation: `y = ${substituted}`,
 		latex: `y = ${substituted}`,
-		metrics: computeMetrics(dataset.y, final.predicted),
-		coefficients: names.map((name) => params[name]!),
-		metadata: Object.fromEntries(names.map((name) => [name, params[name]!]))
+		metrics: computeMetrics(dataset.y, fit.predicted),
+		coefficients: names.map((name) => fit.params[name]!),
+		metadata: Object.fromEntries(names.map((name) => [name, fit.params[name]!]))
 	};
 }
 

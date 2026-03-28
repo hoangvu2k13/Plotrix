@@ -1,11 +1,39 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { onMount } from 'svelte';
+	import {
+		Aperture,
+		ChevronDown,
+		CircleDot,
+		CircleGauge,
+		Crosshair,
+		Download,
+		Grid2x2,
+		Grid3x3,
+		Lock,
+		MoreHorizontal,
+		MousePointer2,
+		PanelLeft,
+		PanelRight,
+		Plus,
+		Radar,
+		Redo2,
+		ScanEye,
+		Settings2,
+		Share2,
+		Sigma,
+		SunMoon,
+		Terminal,
+		Undo2,
+		Upload,
+		X
+	} from '@lucide/svelte';
+	import { onDestroy, onMount } from 'svelte';
 
 	import CommandPalette, { type CommandAction } from '$components/CommandPalette.svelte';
 	import DataPanel from '$components/DataPanel.svelte';
 	import EquationCard from '$components/EquationCard.svelte';
 	import GraphCanvas from '$components/GraphCanvas.svelte';
+	import Icon from '$components/Icon.svelte';
 	import IconButton from '$components/IconButton.svelte';
 	import Modal from '$components/Modal.svelte';
 	import AnalysisPanel from '$components/AnalysisPanel.svelte';
@@ -60,6 +88,7 @@
 	let shareUrl = $state('');
 	let resizingSidebar = $state(false);
 	let settingsSections = $state({ ...DEFAULT_SETTINGS_SECTIONS });
+	let mobileToolbarOpen = $state(false);
 
 	const canUndo = $derived(graph.historyIndex > 0);
 	const canRedo = $derived(graph.historyIndex < graph.historySize - 1);
@@ -89,8 +118,8 @@
 		if (!first || !second) {
 			return;
 		}
-		graph.addEquation(`y >= ${first.raw}`, 'inequality');
-		graph.addEquation(`y <= ${second.raw}`, 'inequality');
+		graph.addEquation(`y >= (${first.raw.trim()})`, 'inequality');
+		graph.addEquation(`y <= (${second.raw.trim()})`, 'inequality');
 		ui.pushToast({
 			title: 'Shaded region added',
 			description: 'Created an inequality pair between the selected curves.',
@@ -152,13 +181,33 @@
 	}
 
 	function openShareModal(): void {
-		shareUrl = graph.shareURL() ?? (browser ? window.location.href : '');
-		ui.openModal('share');
+		try {
+			shareUrl = graph.shareURL() ?? (browser ? window.location.href : '');
+			ui.openModal('share');
+			mobileToolbarOpen = false;
+		} catch (error) {
+			ui.pushToast({
+				title: 'Share link unavailable',
+				description:
+					error instanceof Error ? error.message : 'Plotrix could not build a shareable URL.',
+				tone: 'warning'
+			});
+		}
 	}
 
 	async function copyShareLink(): Promise<void> {
 		if (!shareUrl) {
-			shareUrl = graph.shareURL() ?? '';
+			try {
+				shareUrl = graph.shareURL() ?? '';
+			} catch (error) {
+				ui.pushToast({
+					title: 'Share link unavailable',
+					description:
+						error instanceof Error ? error.message : 'Plotrix could not build a shareable URL.',
+					tone: 'warning'
+				});
+				return;
+			}
 		}
 
 		if (!shareUrl) {
@@ -175,6 +224,10 @@
 
 	function openImportDialog(): void {
 		importInput?.click();
+	}
+
+	function closeMobileToolbar(): void {
+		mobileToolbarOpen = false;
 	}
 
 	function toggleSettingsSection(section: keyof typeof DEFAULT_SETTINGS_SECTIONS): void {
@@ -240,6 +293,7 @@
 	const commandActions = $derived.by<CommandAction[]>(() => [
 		{
 			id: 'add-equation',
+			category: 'Create',
 			title: 'Add equation',
 			description: 'Create a fresh editable equation row.',
 			shortcut: 'Mod+E',
@@ -247,6 +301,7 @@
 		},
 		{
 			id: 'fit-all',
+			category: 'View',
 			title: 'Fit all curves',
 			description: 'Auto-frame the visible equations in the canvas.',
 			shortcut: 'F',
@@ -254,6 +309,7 @@
 		},
 		{
 			id: 'reset-view',
+			category: 'View',
 			title: 'Reset view',
 			description: 'Return to the default zoom and centered origin.',
 			shortcut: '0',
@@ -261,30 +317,35 @@
 		},
 		{
 			id: 'toggle-theme',
+			category: 'Appearance',
 			title: 'Cycle theme',
 			description: 'Move between system, light, and dark presentation.',
 			run: toggleTheme
 		},
 		{
 			id: 'export-svg',
+			category: 'Export',
 			title: 'Export SVG',
 			description: 'Save a vector render of the current graph.',
 			run: exportSVGFile
 		},
 		{
 			id: 'share',
+			category: 'Export',
 			title: 'Open share link',
 			description: 'Generate a portable URL with the current graph state.',
 			run: openShareModal
 		},
 		{
 			id: 'settings',
+			category: 'Workspace',
 			title: 'Open settings',
 			description: 'Fine tune canvas, theme, and rendering preferences.',
 			run: () => ui.openModal('settings')
 		},
 		{
 			id: 'toggle-analysis',
+			category: 'Analysis',
 			title: 'Toggle analysis panel',
 			description: 'Open the analysis drawer for the active equation.',
 			shortcut: 'Mod+Shift+A',
@@ -292,6 +353,7 @@
 		},
 		{
 			id: 'open-regression',
+			category: 'Analysis',
 			title: 'Open regression panel',
 			description: 'Fit a model to the active data sheet.',
 			shortcut: 'Mod+Shift+R',
@@ -299,6 +361,7 @@
 		},
 		{
 			id: 'open-data',
+			category: 'Data',
 			title: 'Switch to data tab',
 			description: 'Open the spreadsheet data panel.',
 			shortcut: 'Mod+Shift+D',
@@ -309,6 +372,7 @@
 		},
 		{
 			id: 'toggle-markers',
+			category: 'Analysis',
 			title: 'Toggle critical markers',
 			description: 'Show or hide critical point markers.',
 			shortcut: 'Mod+Shift+M',
@@ -316,6 +380,7 @@
 		},
 		{
 			id: 'toggle-intersections',
+			category: 'Analysis',
 			title: 'Toggle intersections',
 			description: 'Show or hide intersection markers.',
 			shortcut: 'Mod+Shift+I',
@@ -388,6 +453,10 @@
 		ui.activeEquationId = graph.equations[0]?.id ?? null;
 	});
 
+	onDestroy(() => {
+		graph.destroy();
+	});
+
 	$effect(() => {
 		if (!browser) {
 			return;
@@ -434,7 +503,7 @@
 
 <div class="page-shell">
 	<header class="topbar">
-		<div class="topbar-brand" aria-hidden="true">
+		<div class="topbar-brand">
 			<img src="/brand/icon.svg" alt="" width="18" height="18" />
 			<span>Plotrix</span>
 		</div>
@@ -445,40 +514,15 @@
 				size={36}
 				onClick={() => ui.setSidebarOpen(!ui.sidebarOpen)}
 			>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					{#if ui.sidebarOpen}
-						<path
-							d="M7.25 4.75 12.5 10l-5.25 5.25M4 4.5h2.25v11H4z"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.7"
-						/>
-					{:else}
-						<path
-							d="M12.75 4.75 7.5 10l5.25 5.25M13.75 4.5H16v11h-2.25z"
-							fill="none"
-							stroke="currentColor"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.7"
-						/>
-					{/if}
-				</svg>
+				<Icon
+					icon={ui.sidebarOpen ? PanelLeft : PanelRight}
+					size="var(--icon-lg)"
+					class="toolbar-icon"
+				/>
 			</IconButton>
 
 			<IconButton label="Command" size={36} onClick={() => ui.setCommandPaletteOpen(true)}>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="M3.5 5.5h13v9h-13zM6.25 8.25l2 1.75-2 1.75M11 13h3"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.6"
-					/>
-				</svg>
+				<Icon icon={Terminal} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 		</div>
 
@@ -486,29 +530,11 @@
 
 		<div class="toolbar-cluster">
 			<IconButton label="Undo" size={36} disabled={!canUndo} onClick={() => graph.undoHistory()}>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="M8 5.25 3.75 9.5 8 13.75M4.25 9.5h6.25a5 5 0 1 1 0 10"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.7"
-					/>
-				</svg>
+				<Icon icon={Undo2} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 
 			<IconButton label="Redo" size={36} disabled={!canRedo} onClick={() => graph.redoHistory()}>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="m12 5.25 4.25 4.25L12 13.75M15.75 9.5H9.5a5 5 0 1 0 0 10"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.7"
-					/>
-				</svg>
+				<Icon icon={Redo2} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 		</div>
 
@@ -516,22 +542,7 @@
 
 		<div class="toolbar-cluster">
 			<IconButton label="Theme" size={36} onClick={toggleTheme}>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="M10 2.75v2.1M10 15.15v2.1M4.87 4.87l1.48 1.48M13.65 13.65l1.48 1.48M2.75 10h2.1M15.15 10h2.1M4.87 15.13l1.48-1.48M13.65 6.35l1.48-1.48"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-width="1.4"
-					/>
-					<path
-						d="M12.5 4.2a6 6 0 1 0 3.3 10.3A6.3 6.3 0 0 1 12.5 4.2Z"
-						fill="none"
-						stroke="currentColor"
-						stroke-linejoin="round"
-						stroke-width="1.5"
-					/>
-				</svg>
+				<Icon icon={SunMoon} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 		</div>
 
@@ -539,45 +550,79 @@
 
 		<div class="toolbar-cluster">
 			<IconButton label="Settings" size={36} onClick={() => ui.openModal('settings')}>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="M10 4.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Zm0-2 1.02 1.95 2.2.35.64 2.13 1.84 1.25-.72 2.1.72 2.1-1.84 1.25-.64 2.13-2.2.35L10 17.5l-1.02-1.95-2.2-.35-.64-2.13L4.3 11.82l.72-2.1-.72-2.1 1.84-1.25.64-2.13 2.2-.35Z"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.4"
-					/>
-				</svg>
+				<Icon icon={Settings2} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 
 			<IconButton label="Export" size={36} onClick={() => ui.openModal('export')}>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="M10 3.5v8M6.75 8.5 10 11.75 13.25 8.5M4 14.5h12v2H4z"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.7"
-					/>
-				</svg>
+				<Icon icon={Download} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 
 			<IconButton label="Share" size={36} onClick={openShareModal}>
-				<svg viewBox="0 0 20 20" aria-hidden="true">
-					<path
-						d="M8.25 10.75 11.75 9.25M8.25 9.25 11.75 10.75M14.5 6.25a2.25 2.25 0 1 0 0-4.5 2.25 2.25 0 0 0 0 4.5ZM5.5 12.25a2.25 2.25 0 1 0 0-4.5 2.25 2.25 0 0 0 0 4.5Zm9 6a2.25 2.25 0 1 0 0-4.5 2.25 2.25 0 0 0 0 4.5Z"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.6"
-					/>
-				</svg>
+				<Icon icon={Share2} size="var(--icon-lg)" class="toolbar-icon" />
 			</IconButton>
 		</div>
+
+		<div class="toolbar-mobile-actions">
+			<button
+				type="button"
+				class="toolbar-overflow-trigger"
+				aria-expanded={mobileToolbarOpen}
+				aria-label="Open toolbar actions"
+				onclick={() => (mobileToolbarOpen = !mobileToolbarOpen)}
+			>
+				<Icon icon={MoreHorizontal} size="var(--icon-lg)" class="toolbar-icon" />
+				<span>More</span>
+			</button>
+		</div>
 	</header>
+
+	{#if mobileToolbarOpen}
+		<button
+			type="button"
+			class="toolbar-popover-backdrop"
+			aria-label="Close toolbar actions"
+			onclick={closeMobileToolbar}
+		></button>
+		<div class="toolbar-popover" role="dialog" aria-label="Toolbar actions">
+			<button
+				type="button"
+				class="toolbar-popover-item"
+				onclick={() => {
+					toggleTheme();
+					closeMobileToolbar();
+				}}
+			>
+				<Icon icon={SunMoon} size="var(--icon-md)" class="inline-icon" />
+				<span>Theme</span>
+			</button>
+			<button
+				type="button"
+				class="toolbar-popover-item"
+				onclick={() => {
+					ui.openModal('settings');
+					closeMobileToolbar();
+				}}
+			>
+				<Icon icon={Settings2} size="var(--icon-md)" class="inline-icon" />
+				<span>Settings</span>
+			</button>
+			<button
+				type="button"
+				class="toolbar-popover-item"
+				onclick={() => {
+					ui.openModal('export');
+					closeMobileToolbar();
+				}}
+			>
+				<Icon icon={Download} size="var(--icon-md)" class="inline-icon" />
+				<span>Export</span>
+			</button>
+			<button type="button" class="toolbar-popover-item" onclick={openShareModal}>
+				<Icon icon={Share2} size="var(--icon-md)" class="inline-icon" />
+				<span>Share</span>
+			</button>
+		</div>
+	{/if}
 
 	<div
 		class:sidebar-collapsed={!ui.sidebarOpen}
@@ -610,15 +655,7 @@
 							class="compact-action compact-action-accent"
 							onclick={() => addEquation('')}
 						>
-							<svg viewBox="0 0 20 20" aria-hidden="true">
-								<path
-									d="M10 4.5v11M4.5 10h11"
-									fill="none"
-									stroke="currentColor"
-									stroke-linecap="round"
-									stroke-width="1.8"
-								/>
-							</svg>
+							<Icon icon={Plus} size="var(--icon-md)" class="inline-icon" />
 							<span>Add</span>
 						</button>
 
@@ -627,16 +664,7 @@
 							class="compact-action compact-action-neutral"
 							onclick={openImportDialog}
 						>
-							<svg viewBox="0 0 20 20" aria-hidden="true">
-								<path
-									d="M10 3.5v8m0 0 2.75-2.75M10 11.5 7.25 8.75M4 13.75v1.75h12v-1.75"
-									fill="none"
-									stroke="currentColor"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									stroke-width="1.5"
-								/>
-							</svg>
+							<Icon icon={Upload} size="var(--icon-md)" class="inline-icon" />
 							<span>Import</span>
 						</button>
 					</div>
@@ -650,16 +678,7 @@
 						aria-selected={ui.sidebarActiveTab === 'equations'}
 						onclick={() => ui.setSidebarActiveTab('equations')}
 					>
-						<svg viewBox="0 0 20 20" aria-hidden="true">
-							<path
-								d="M4 13.75h12M5.5 11V7m4 4V5.5m4 5.5V8"
-								fill="none"
-								stroke="currentColor"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="1.5"
-							/>
-						</svg>
+						<Icon icon={Sigma} size="var(--icon-md)" class="inline-icon" />
 						Equations
 					</button>
 					<button
@@ -670,16 +689,7 @@
 						aria-selected={ui.sidebarActiveTab === 'data'}
 						onclick={() => ui.setSidebarActiveTab('data')}
 					>
-						<svg viewBox="0 0 20 20" aria-hidden="true">
-							<path
-								d="M4.5 4.5h11v11h-11zM4.5 8.5h11M8.5 4.5v11M12.5 4.5v11"
-								fill="none"
-								stroke="currentColor"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="1.5"
-							/>
-						</svg>
+						<Icon icon={Grid3x3} size="var(--icon-md)" class="inline-icon" />
 						Data
 					</button>
 				</div>
@@ -698,15 +708,7 @@
 									class="compact-action compact-action-accent"
 									onclick={() => addEquation('')}
 								>
-									<svg viewBox="0 0 20 20" aria-hidden="true">
-										<path
-											d="M10 4.5v11M4.5 10h11"
-											fill="none"
-											stroke="currentColor"
-											stroke-linecap="round"
-											stroke-width="1.8"
-										/>
-									</svg>
+									<Icon icon={Plus} size="var(--icon-md)" class="inline-icon" />
 									<span>Add equation</span>
 								</button>
 							</div>
@@ -719,15 +721,20 @@
 						<DataPanel {graph} {ui} />
 					</div>
 				{/if}
-				{#if ui.sidebarActiveTab === 'equations' && ui.selectedEquationIds.size === 2}
+				{#if ui.sidebarActiveTab === 'equations'}
 					<div class="sidebar-footer">
-						<button
-							type="button"
-							class="compact-action compact-action-neutral shade-between"
-							onclick={shadeBetweenSelected}
-						>
-							Shade between
-						</button>
+						<p class="selection-hint">
+							Select two equations with `Shift` + click to shade between them.
+						</p>
+						{#if ui.selectedEquationIds.size === 2}
+							<button
+								type="button"
+								class="compact-action compact-action-neutral shade-between"
+								onclick={shadeBetweenSelected}
+							>
+								Shade between
+							</button>
+						{/if}
 					</div>
 				{/if}
 			</section>
@@ -766,22 +773,17 @@
 					<h3>Appearance</h3>
 					<p>Core presentation and interaction overlays.</p>
 				</div>
-				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.appearance}>
-					<path
-						d="m6 8 4 4 4-4"
-						fill="none"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="1.7"
-					/>
-				</svg>
+				<Icon
+					icon={ChevronDown}
+					size="var(--icon-md)"
+					class={`section-chevron ${!settingsSections.appearance ? 'collapsed' : ''}`}
+				/>
 			</button>
 			{#if settingsSections.appearance}
 				<div class="settings-category-body">
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v2.25M10 14.75V17M4.75 4.75l1.5 1.5M13.75 13.75l1.5 1.5M3 10h2.25M14.75 10H17M4.75 15.25l1.5-1.5M13.75 6.25l1.5-1.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M12.25 4.75a5.25 5.25 0 1 0 2.75 9 5.5 5.5 0 0 1-2.75-9Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={SunMoon} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong>Theme</strong>
@@ -790,13 +792,14 @@
 							value={graph.settings.theme}
 							options={themeOptions}
 							ariaLabel="Theme"
-							onChange={(value) => graph.updateSettings({ theme: value as typeof graph.settings.theme })}
+							onChange={(value) =>
+								graph.updateSettings({ theme: value as typeof graph.settings.theme })}
 						/>
 					</div>
 
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 6.5h3l2 7 2-7h3M4.5 13.5h3M12.5 13.5h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={Sigma} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-axis-labels-label">Axis labels</strong>
@@ -812,7 +815,7 @@
 
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 3v3M10 14v3M3 10h3M14 10h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>
+							<Icon icon={Crosshair} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-crosshair-label">Crosshair</strong>
@@ -828,7 +831,7 @@
 
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5 14.5 10 10.75 10.75 10 14.5 6 4.5Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><circle cx="14.75" cy="5.25" r="1" fill="currentColor" stroke="none" /></svg>
+							<Icon icon={MousePointer2} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-trace-label">Trace mode</strong>
@@ -856,15 +859,17 @@
 					<h3>Grid & Axes</h3>
 					<p>Structure, spacing, and axis scaffolding.</p>
 				</div>
-				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.grid}>
-					<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
-				</svg>
+				<Icon
+					icon={ChevronDown}
+					size="var(--icon-md)"
+					class={`section-chevron ${!settingsSections.grid ? 'collapsed' : ''}`}
+				/>
 			</button>
 			{#if settingsSections.grid}
 				<div class="settings-category-body">
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6.5h12M4 10h12M4 13.5h12" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>
+							<Icon icon={Grid3x3} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-grid-label">Grid</strong>
@@ -878,9 +883,12 @@
 						/>
 					</div>
 
-					<div class="setting-row setting-row-nested" class:is-disabled={!graph.settings.gridVisible}>
+					<div
+						class="setting-row setting-row-nested"
+						class:is-disabled={!graph.settings.gridVisible}
+					>
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11M14 4.5v11M3.5 7h13M3.5 13h13" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={Radar} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong>Grid style</strong>
@@ -891,13 +899,17 @@
 							options={gridStyleOptions}
 							ariaLabel="Grid style"
 							disabled={!graph.settings.gridVisible}
-							onChange={(value) => graph.updateSettings({ gridStyle: value as typeof graph.settings.gridStyle })}
+							onChange={(value) =>
+								graph.updateSettings({ gridStyle: value as typeof graph.settings.gridStyle })}
 						/>
 					</div>
 
-					<div class="setting-row setting-row-nested" class:is-disabled={!graph.settings.gridVisible}>
+					<div
+						class="setting-row setting-row-nested"
+						class:is-disabled={!graph.settings.gridVisible}
+					>
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6.5h.01M14 6.5h.01M6 13.5h.01M14 13.5h.01" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>
+							<Icon icon={Grid2x2} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-minor-grid-label">Minor grid</strong>
@@ -926,15 +938,17 @@
 					<h3>Analysis</h3>
 					<p>Markers and analytical overlays.</p>
 				</div>
-				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.analysis}>
-					<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
-				</svg>
+				<Icon
+					icon={ChevronDown}
+					size="var(--icon-md)"
+					class={`section-chevron ${!settingsSections.analysis ? 'collapsed' : ''}`}
+				/>
 			</button>
 			{#if settingsSections.analysis}
 				<div class="settings-category-body">
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5v8m0 0 2.75-2.75M10 11.5 7.25 8.75M4 13.75v1.75h12v-1.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={CircleDot} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-critical-label">Critical markers</strong>
@@ -950,7 +964,7 @@
 
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={X} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-intersections-label">Intersections</strong>
@@ -978,15 +992,17 @@
 					<h3>Rendering</h3>
 					<p>Performance and raster output behavior.</p>
 				</div>
-				<svg viewBox="0 0 20 20" aria-hidden="true" class:collapsed={!settingsSections.rendering}>
-					<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" />
-				</svg>
+				<Icon
+					icon={ChevronDown}
+					size="var(--icon-md)"
+					class={`section-chevron ${!settingsSections.rendering ? 'collapsed' : ''}`}
+				/>
 			</button>
 			{#if settingsSections.rendering}
 				<div class="settings-category-body">
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.25a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm0-1.75v2M10 15.5v2M4.5 10h-2M17.5 10h-2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={CircleGauge} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-render-timing-label">Render timings</strong>
@@ -1002,7 +1018,7 @@
 
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h9v8H4zM13 8.5l2.5-2.5M10.5 9.5l4 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={ScanEye} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-hidpi-label">HiDPI rendering</strong>
@@ -1018,7 +1034,7 @@
 
 					<div class="setting-row">
 						<div class="setting-row-icon">
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 10a5.5 5.5 0 0 1 11 0M6.5 10a3.5 3.5 0 1 1 7 0M10 10l2.75-2.75" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>
+							<Icon icon={Aperture} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-antialiasing-label">Antialiasing</strong>
@@ -1037,19 +1053,11 @@
 	</div>
 </Modal>
 
-<Modal
-	open={ui.modalOpen === 'regression'}
-	title="Regression"
-	onClose={() => ui.closeModal()}
->
+<Modal open={ui.modalOpen === 'regression'} title="Regression" onClose={() => ui.closeModal()}>
 	<RegressionPanel {graph} {ui} />
 </Modal>
 
-<Modal
-	open={ui.modalOpen === 'export'}
-	title="Export"
-	onClose={() => ui.closeModal()}
->
+<Modal open={ui.modalOpen === 'export'} title="Export" onClose={() => ui.closeModal()}>
 	<div class="export-grid">
 		<button type="button" class="export-card" onclick={() => exportPNG(1)}>
 			<strong>PNG 1x</strong>
@@ -1074,13 +1082,15 @@
 	</div>
 </Modal>
 
-<Modal
-	open={ui.modalOpen === 'share'}
-	title="Share"
-	onClose={() => ui.closeModal()}
->
+<Modal open={ui.modalOpen === 'share'} title="Share" onClose={() => ui.closeModal()}>
 	<div class="share-stack">
-		<input readonly value={shareUrl} />
+		<div class="share-field">
+			<div class="share-field-icon" aria-hidden="true">
+				<Icon icon={Lock} size="var(--icon-md)" class="inline-icon" />
+			</div>
+			<input class="share-readonly" readonly value={shareUrl} />
+		</div>
+		<p class="share-note">Read-only link generated from the current Plotrix session.</p>
 		<div class="share-actions">
 			<button type="button" class="action-btn action-btn-primary" onclick={copyShareLink}>
 				Copy link
@@ -1096,11 +1106,7 @@
 	</div>
 </Modal>
 
-<Modal
-	open={ui.modalOpen === 'shortcuts'}
-	title="Shortcuts"
-	onClose={() => ui.closeModal()}
->
+<Modal open={ui.modalOpen === 'shortcuts'} title="Shortcuts" onClose={() => ui.closeModal()}>
 	<div class="shortcut-list">
 		{#each shortcuts as [label, combo] (label)}
 			<div class="shortcut-row">
@@ -1143,7 +1149,65 @@
 		padding: 0 var(--space-4);
 		border-bottom: 1px solid var(--color-border);
 		background: var(--color-bg-surface);
-		overflow-x: auto;
+	}
+
+	.toolbar-mobile-actions {
+		display: none;
+		margin-left: auto;
+	}
+
+	.toolbar-overflow-trigger {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
+		height: 36px;
+		padding: 0 var(--space-3);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-lg);
+		background: var(--color-bg-overlay);
+		color: var(--color-text-secondary);
+		font-size: var(--text-sm);
+		font-weight: var(--font-weight-medium);
+	}
+
+	.toolbar-popover-backdrop {
+		position: fixed;
+		inset: 48px 0 0;
+		z-index: calc(var(--z-toolbar) + 1);
+		background: rgba(9, 9, 11, 0.22);
+	}
+
+	.toolbar-popover {
+		position: fixed;
+		top: calc(48px + var(--space-2));
+		right: var(--space-3);
+		z-index: calc(var(--z-toolbar) + 2);
+		display: grid;
+		gap: var(--space-2);
+		min-width: 180px;
+		padding: var(--space-3);
+		border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+		border-radius: var(--radius-xl);
+		background: color-mix(in srgb, var(--color-bg-surface) 96%, transparent);
+		box-shadow: var(--shadow-lg);
+		backdrop-filter: blur(12px);
+	}
+
+	.toolbar-popover-item {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2);
+		height: 36px;
+		padding: 0 var(--space-3);
+		border-radius: var(--radius-lg);
+		background: transparent;
+		color: var(--color-text-primary);
+		text-align: left;
+	}
+
+	.toolbar-popover-item:hover {
+		background: var(--color-bg-overlay);
+		border-radius: var(--radius-lg);
 	}
 
 	.topbar-brand {
@@ -1184,7 +1248,6 @@
 		min-height: 0;
 		padding: var(--space-3);
 		gap: var(--space-3);
-		transition: grid-template-columns var(--duration-normal) var(--ease-default);
 	}
 
 	.workspace.sidebar-collapsed {
@@ -1196,7 +1259,6 @@
 		z-index: var(--z-sidebar);
 		min-height: 0;
 		min-width: 0;
-		overflow: hidden;
 		transition:
 			opacity var(--duration-normal) var(--ease-default),
 			transform var(--duration-normal) var(--ease-default);
@@ -1284,9 +1346,9 @@
 		transform: translateY(-1px);
 	}
 
-	.compact-action svg {
-		width: 14px;
-		height: 14px;
+	:global(.inline-icon),
+	:global(.toolbar-icon) {
+		display: block;
 	}
 
 	.compact-action-accent {
@@ -1296,8 +1358,8 @@
 	}
 
 	.compact-action-neutral {
-		border: 1px solid var(--color-border);
-		background: var(--color-bg-overlay);
+		border: 1px solid transparent;
+		background: transparent;
 		color: var(--color-text-secondary);
 	}
 
@@ -1339,11 +1401,6 @@
 		font-weight: 500;
 		color: var(--color-text-secondary);
 		cursor: pointer;
-	}
-
-	.sidebar-tab svg {
-		width: 16px;
-		height: 16px;
 	}
 
 	.sidebar-tab.active {
@@ -1396,7 +1453,7 @@
 		gap: var(--space-3);
 		min-height: 0;
 		overflow: auto;
-		padding-right: var(--space-1);
+		scrollbar-gutter: stable;
 	}
 
 	.shade-between {
@@ -1404,8 +1461,15 @@
 	}
 
 	.sidebar-footer {
+		display: grid;
+		gap: var(--space-2);
 		padding-top: var(--space-2);
 		border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+	}
+
+	.selection-hint {
+		color: var(--color-text-secondary);
+		font-size: var(--text-xs);
 	}
 
 	.empty-state {
@@ -1479,6 +1543,13 @@
 		border-bottom: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
 	}
 
+	.settings-category-header:focus-visible {
+		outline: none;
+		box-shadow:
+			inset 0 0 0 2px color-mix(in srgb, var(--color-accent) 58%, transparent),
+			var(--shadow-focus);
+	}
+
 	.settings-category-header h3 {
 		font-size: var(--text-sm);
 	}
@@ -1489,14 +1560,12 @@
 		font-size: var(--text-xs);
 	}
 
-	.settings-category-header svg {
-		width: 16px;
-		height: 16px;
+	:global(.section-chevron) {
 		flex-shrink: 0;
 		transition: transform var(--duration-fast) var(--ease-default);
 	}
 
-	.settings-category-header svg.collapsed {
+	:global(.section-chevron.collapsed) {
 		transform: rotate(-90deg);
 	}
 
@@ -1525,9 +1594,8 @@
 		color: var(--color-text-secondary);
 	}
 
-	.setting-row-icon svg {
-		width: 20px;
-		height: 20px;
+	:global(.setting-icon) {
+		display: block;
 	}
 
 	.setting-copy {
@@ -1569,7 +1637,7 @@
 	}
 
 	.export-grid {
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 		gap: var(--space-3);
 	}
 
@@ -1600,13 +1668,37 @@
 		gap: var(--space-3);
 	}
 
-	.share-stack input {
-		width: 100%;
-		padding: var(--space-3) var(--space-4);
+	.share-field {
+		display: grid;
+		grid-template-columns: 40px minmax(0, 1fr);
+		align-items: center;
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-lg);
-		background: var(--color-bg-overlay);
+		background: color-mix(in srgb, var(--color-bg-overlay) 92%, var(--color-bg-base));
+	}
+
+	.share-field-icon {
+		display: grid;
+		place-items: center;
+		color: var(--color-text-secondary);
+	}
+
+	.share-stack input,
+	.share-readonly {
+		width: 100%;
+		padding: var(--space-3) var(--space-4);
+		border: 0;
+		background: transparent;
 		color: var(--color-text-primary);
+	}
+
+	.share-readonly {
+		font-family: var(--font-mono);
+	}
+
+	.share-note {
+		color: var(--color-text-secondary);
+		font-size: var(--text-xs);
 	}
 
 	.share-actions {
@@ -1664,11 +1756,13 @@
 		font-size: var(--text-xs);
 	}
 
-	@media (max-width: 960px) {
+	@media (max-width: 1100px) {
 		.settings-list {
 			grid-template-columns: 1fr;
 		}
+	}
 
+	@media (max-width: 960px) {
 		:global(body) {
 			overflow: auto;
 		}
@@ -1677,6 +1771,16 @@
 			grid-template-rows: 48px auto;
 			height: auto;
 			min-height: 100svh;
+		}
+
+		.toolbar-divider,
+		.topbar > .toolbar-cluster:nth-of-type(3),
+		.topbar > .toolbar-cluster:nth-of-type(4) {
+			display: none;
+		}
+
+		.toolbar-mobile-actions {
+			display: inline-flex;
 		}
 
 		.workspace {

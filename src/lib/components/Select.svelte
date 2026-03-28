@@ -1,4 +1,8 @@
 <script lang="ts">
+	import { ChevronDown } from '@lucide/svelte';
+
+	import Icon from '$components/Icon.svelte';
+
 	export interface SelectOption {
 		value: string;
 		label: string;
@@ -31,16 +35,7 @@
 		{/each}
 	</select>
 
-	<svg viewBox="0 0 20 20" aria-hidden="true">
-		<path
-			d="M5.75 7.75 10 12l4.25-4.25"
-			fill="none"
-			stroke="currentColor"
-			stroke-linecap="round"
-			stroke-linejoin="round"
-			stroke-width="1.8"
-		/>
-	</svg>
+	<Icon icon={ChevronDown} size="var(--icon-sm)" class="select-icon" />
 </label>
 
 <style>
@@ -100,12 +95,10 @@
 		box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 16%, transparent);
 	}
 
-	svg {
+	:global(.select-icon) {
 		position: absolute;
 		top: 50%;
 		right: 12px;
-		width: 14px;
-		height: 14px;
 		color: var(--color-text-secondary);
 		transform: translateY(-50%);
 		pointer-events: none;

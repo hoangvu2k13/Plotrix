@@ -25,6 +25,10 @@
 	const tooltipId = `tooltip-${nanoid()}`;
 
 	function showTooltip(): void {
+		if (typeof window !== 'undefined' && window.matchMedia('(hover: none)').matches) {
+			return;
+		}
+
 		if (timer) clearTimeout(timer);
 		timer = setTimeout(() => {
 			visible = true;
@@ -51,6 +55,7 @@
 		class:active
 		aria-label={label}
 		aria-describedby={visible ? tooltipId : undefined}
+		title={label}
 		{disabled}
 		style={`--button-size:${size}px;`}
 		onclick={onClick}
@@ -79,9 +84,8 @@
 		cursor: pointer;
 	}
 
-	.icon-button :global(svg) {
-		width: 18px;
-		height: 18px;
+	.icon-button :global(.icon) {
+		display: block;
 	}
 
 	.icon-button.default {
