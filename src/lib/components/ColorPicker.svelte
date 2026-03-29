@@ -17,12 +17,7 @@
 			const root = picker.root();
 			const target = event.target;
 
-			if (
-				picker.isOpen() &&
-				root &&
-				target instanceof Node &&
-				!root.contains(target)
-			) {
+			if (picker.isOpen() && root && target instanceof Node && !root.contains(target)) {
 				picker.close();
 			}
 		}
@@ -180,94 +175,3 @@
 		</div>
 	{/if}
 </div>
-
-<style>
-	.picker {
-		position: relative;
-		display: inline-flex;
-	}
-
-	.swatch {
-		width: 32px;
-		height: 32px;
-		padding: 0;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-		background: var(--color-bg-overlay);
-		cursor: pointer;
-		transition:
-			transform var(--duration-fast) var(--ease-default),
-			box-shadow var(--duration-fast) var(--ease-default),
-			border-color var(--duration-fast) var(--ease-default);
-	}
-
-	.swatch span,
-	.color {
-		display: block;
-		width: 100%;
-		height: 100%;
-		border-radius: inherit;
-		background: var(--swatch);
-	}
-
-	.swatch:hover {
-		transform: scale(1.06);
-		box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 25%, transparent);
-		border-color: var(--color-accent);
-	}
-
-	.popover {
-		position: absolute;
-		top: calc(100% + var(--space-2));
-		right: 0;
-		z-index: var(--z-tooltip);
-		display: grid;
-		gap: var(--space-3);
-		min-width: 180px;
-		padding: var(--space-3);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-lg);
-		background: color-mix(in srgb, var(--color-bg-surface) 96%, transparent);
-		box-shadow: var(--shadow-lg);
-		backdrop-filter: blur(12px);
-	}
-
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(6, 1fr);
-		gap: var(--space-2);
-	}
-
-	.color {
-		width: 22px;
-		height: 22px;
-		padding: 0;
-		border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
-		border-radius: var(--radius-sm);
-		cursor: pointer;
-	}
-
-	.color.selected {
-		box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 35%, transparent);
-	}
-
-	.hex {
-		display: grid;
-		gap: var(--space-1);
-		font-size: var(--text-xs);
-		color: var(--color-text-secondary);
-	}
-
-	.hex input {
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-		background: var(--color-bg-base);
-		font-family: var(--font-mono);
-		font-size: var(--text-sm);
-	}
-
-	.hex input.invalid {
-		border-color: var(--color-danger);
-	}
-</style>

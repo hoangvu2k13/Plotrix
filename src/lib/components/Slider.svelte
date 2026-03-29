@@ -50,9 +50,3 @@
 	aria-label={ariaLabel}
 	oninput={(event) => onChange(Number((event.currentTarget as HTMLInputElement).value))}
 />
-
-<style>
-	.slider {
-		width: 100%;
-	}
-</style>

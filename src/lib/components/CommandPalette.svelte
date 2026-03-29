@@ -148,20 +148,20 @@
 
 {#if open}
 	<div
-		class="backdrop"
+		class="command-palette-backdrop"
 		role="presentation"
 		onpointerdown={handleBackdropPointerDown}
 		transition:fade
 	>
 		<div
 			bind:this={panel}
-			class="panel"
+			class="command-palette-panel"
 			role="dialog"
 			aria-modal="true"
 			aria-label="Command palette"
 			transition:fly={{ y: 18, duration: 220 }}
 		>
-			<div class="palette">
+			<div class="command-palette">
 				<label class="search-shell">
 					<Icon icon={Search} size="var(--icon-md)" class="search-icon" />
 					<input
@@ -203,148 +203,3 @@
 		</div>
 	</div>
 {/if}
-
-<style>
-	.backdrop {
-		position: fixed;
-		inset: 0;
-		z-index: var(--z-modal);
-		display: grid;
-		place-items: start center;
-		padding: min(14vh, 7rem) var(--space-6) var(--space-6);
-		background: rgba(9, 9, 11, 0.55);
-		backdrop-filter: blur(12px);
-	}
-
-	@supports not (backdrop-filter: blur(12px)) {
-		.backdrop {
-			background: rgba(9, 9, 11, 0.76);
-		}
-	}
-
-	.panel {
-		width: min(680px, 100%);
-		border: 1px solid color-mix(in srgb, var(--color-border) 84%, transparent);
-		border-radius: var(--radius-2xl);
-		background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
-		box-shadow: var(--shadow-xl);
-		overflow: hidden;
-	}
-
-	.palette {
-		display: grid;
-		gap: var(--space-4);
-		padding: var(--space-4);
-	}
-
-	.search-shell {
-		position: relative;
-		display: block;
-	}
-
-	:global(.search-icon) {
-		position: absolute;
-		top: 50%;
-		left: var(--space-4);
-		color: var(--color-text-secondary);
-		transform: translateY(-50%);
-		pointer-events: none;
-	}
-
-	input {
-		width: 100%;
-		padding: var(--space-3) var(--space-4) var(--space-3) calc(var(--space-4) + 24px);
-		border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
-		border-radius: var(--radius-lg);
-		background: var(--color-bg-overlay);
-		color: var(--color-text-primary);
-	}
-
-	input:focus {
-		outline: none;
-		border-color: color-mix(in srgb, var(--color-accent) 62%, var(--color-border));
-		box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 16%, transparent);
-	}
-
-	.results {
-		display: grid;
-		gap: var(--space-2);
-		max-height: min(48vh, 420px);
-		overflow: auto;
-	}
-
-	.results button {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-4);
-		padding: var(--space-3) var(--space-4);
-		border: 1px solid transparent;
-		border-radius: var(--radius-lg);
-		background: transparent;
-		text-align: left;
-		cursor: pointer;
-		transition:
-			background-color var(--duration-fast) var(--ease-default),
-			border-color var(--duration-fast) var(--ease-default);
-	}
-
-	.results button:hover {
-		background: var(--color-bg-overlay);
-	}
-
-	.results button.selected {
-		padding-left: calc(var(--space-4) - 3px);
-		border-color: color-mix(in srgb, var(--color-accent) 20%, transparent);
-		border-left: 3px solid var(--color-accent);
-		background: linear-gradient(
-			90deg,
-			color-mix(in srgb, var(--color-accent) 20%, transparent),
-			color-mix(in srgb, var(--color-accent) 8%, transparent)
-		);
-	}
-
-	.copy {
-		display: grid;
-		gap: 2px;
-	}
-
-	.copy strong {
-		color: var(--color-text-secondary);
-		font-weight: var(--font-weight-medium);
-	}
-
-	.results button.selected .copy strong {
-		color: var(--color-text-primary);
-		font-weight: var(--font-weight-semibold);
-	}
-
-	small,
-	.empty {
-		color: var(--color-text-secondary);
-	}
-
-	.group {
-		display: grid;
-		gap: var(--space-2);
-	}
-
-	.group-label {
-		margin-top: var(--space-3);
-		padding: 0 var(--space-2);
-		color: var(--color-text-muted);
-		font-size: var(--text-xs);
-		font-weight: var(--font-weight-semibold);
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
-	}
-
-	kbd {
-		padding: 2px 6px;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-sm);
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		background: var(--color-bg-subtle);
-	}
-</style>

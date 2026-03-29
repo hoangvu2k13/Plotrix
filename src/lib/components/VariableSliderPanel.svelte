@@ -50,7 +50,7 @@
 </script>
 
 {#if graph.variables.length}
-	<section class="panel">
+	<section class="variable-slider-panel panel">
 		<button
 			type="button"
 			class="header"
@@ -146,106 +146,3 @@
 		{/if}
 	</section>
 {/if}
-
-<style>
-	.panel {
-		display: grid;
-		gap: var(--space-3);
-		padding: var(--space-3);
-		border: 1px solid color-mix(in srgb, var(--color-accent) 18%, var(--color-border));
-		border-radius: var(--radius-xl);
-		background: linear-gradient(
-			180deg,
-			color-mix(in srgb, var(--color-accent) 7%, var(--color-bg-surface)),
-			color-mix(in srgb, var(--color-bg-surface) 96%, transparent)
-		);
-	}
-
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		color: var(--color-text-muted);
-		font-size: var(--text-xs);
-		font-weight: var(--font-weight-semibold);
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		cursor: pointer;
-	}
-
-	:global(.header-icon) {
-		transition: transform var(--duration-fast) var(--ease-default);
-	}
-
-	.rows,
-	.row,
-	.config {
-		display: grid;
-		gap: var(--space-2);
-	}
-
-	.main {
-		display: grid;
-		grid-template-columns: 24px minmax(0, 1fr) 60px 32px;
-		align-items: center;
-		gap: var(--space-2);
-	}
-
-	.main strong {
-		font-family: var(--font-mono);
-		color: var(--color-accent);
-	}
-
-	.value-input,
-	.config input {
-		padding: var(--space-1) var(--space-2);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-sm);
-		background: var(--color-bg-base);
-		font-family: var(--font-mono);
-		font-size: var(--text-sm);
-	}
-
-	.play {
-		display: inline-grid;
-		place-items: center;
-		width: 32px;
-		height: 32px;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-		background: var(--color-bg-overlay);
-		cursor: pointer;
-	}
-
-	:global(.play-icon) {
-		display: block;
-	}
-
-	.config {
-		grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr) 118px;
-		align-items: center;
-		font-size: var(--text-xs);
-		color: var(--color-text-secondary);
-	}
-
-	.config > span {
-		width: 24px;
-		text-align: center;
-	}
-
-	.config label {
-		display: grid;
-		grid-template-columns: 34px minmax(64px, 84px);
-		align-items: center;
-		gap: var(--space-1);
-	}
-
-	.config label span {
-		width: 34px;
-	}
-
-	.separator {
-		height: 1px;
-		background: color-mix(in srgb, var(--color-border) 70%, transparent);
-	}
-</style>

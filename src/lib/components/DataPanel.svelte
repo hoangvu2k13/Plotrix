@@ -239,13 +239,15 @@
 			...series.rows
 				.filter((row) => row.some((cell) => cell.trim().length > 0))
 				.map((row) =>
-					series.columns
-						.map((_, columnIndex) => escapeCsvCell(row[columnIndex] ?? ''))
-						.join(',')
+					series.columns.map((_, columnIndex) => escapeCsvCell(row[columnIndex] ?? '')).join(',')
 				)
 		];
 
-		saveText(lines.join('\n'), `${series.name.toLowerCase().replace(/\s+/g, '-') || 'plotrix-data'}.csv`, 'text/csv;charset=utf-8');
+		saveText(
+			lines.join('\n'),
+			`${series.name.toLowerCase().replace(/\s+/g, '-') || 'plotrix-data'}.csv`,
+			'text/csv;charset=utf-8'
+		);
 		ui.pushToast({
 			title: 'CSV exported',
 			description: `${series.name} was exported as CSV.`,
@@ -256,7 +258,7 @@
 
 <input bind:this={importInput} type="file" accept=".csv" class="sr-only" onchange={importCsv} />
 
-<section class="panel">
+<section class="data-panel panel">
 	{#if activeSheet}
 		<div
 			class="grid-wrap"
@@ -465,205 +467,3 @@
 		</div>
 	{/if}
 </section>
-
-<style>
-	.panel {
-		display: grid;
-		gap: var(--space-3);
-		min-height: 0;
-	}
-
-	.grid-wrap {
-		min-height: 0;
-		overflow: auto;
-		flex: 1;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-lg);
-		background: var(--color-bg-surface);
-	}
-
-	.sheet {
-		width: 100%;
-		border-collapse: collapse;
-		table-layout: fixed;
-	}
-
-	tbody * {
-		transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-	}
-
-	thead th {
-		position: sticky;
-		top: 0;
-		z-index: 3;
-	}
-
-	th div,
-	td div {
-		min-width: 1em;
-		min-height: 28px;
-		padding: var(--space-2);
-		font-family: var(--font-mono);
-		font-size: var(--text-sm);
-		outline: none;
-	}
-
-	th div:focus,
-	td div:focus {
-		border-color: var(--color-accent);
-		box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
-	}
-
-	.row-number {
-		width: 30px;
-		text-align: center;
-		color: var(--color-text-muted);
-	}
-
-	.data-col-header {
-		height: 32px;
-		padding: 2px;
-		border-right: 1px solid var(--color-border);
-		border-bottom: 1px solid var(--color-border);
-		background: var(--color-bg-overlay);
-		font-size: var(--text-xs);
-		font-weight: var(--font-weight-semibold);
-		color: var(--color-text-secondary);
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		text-align: center;
-		user-select: none;
-		position: relative;
-	}
-
-	.add-col {
-		width: 40px;
-	}
-
-	.data-row-num {
-		position: sticky;
-		left: 0;
-		z-index: 2;
-		min-width: 32px;
-		padding: 0;
-		background: var(--color-bg-overlay);
-		border-right: 1px solid var(--color-border);
-		font-size: 10px;
-		user-select: none;
-	}
-
-	.data-cell {
-		height: 28px;
-		padding: 2px;
-		border-right: 1px solid rgba(var(--color-border-rgb), 0.4);
-		border-bottom: 1px solid rgba(var(--color-border-rgb), 0.4);
-	}
-
-	.row-actions {
-		width: 40px;
-		padding: 2px;
-		border-bottom: 1px solid rgba(var(--color-border-rgb), 0.4);
-	}
-
-	tr.odd td:not(.data-row-num) {
-		background: transparent;
-	}
-
-	tr:not(.odd) td:not(.data-row-num) {
-		background: var(--color-bg-surface);
-	}
-
-	.series-options,
-	.actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-3);
-		align-items: center;
-	}
-
-	:global(.action-icon) {
-		display: block;
-	}
-
-	.series-options {
-		padding: var(--space-3);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-xl);
-		background: color-mix(in srgb, var(--color-bg-surface) 96%, transparent);
-	}
-
-	.symbols {
-		display: inline-flex;
-		gap: var(--space-2);
-	}
-
-	.symbols button,
-	.sheet-tabs button,
-	.primary,
-	.secondary,
-	.tiny {
-		height: 32px;
-		padding: 0 var(--space-3);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-		background: var(--color-bg-overlay);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		align-content: center;
-		text-align: center;
-		cursor: pointer;
-	}
-
-	.symbols button.selected,
-	.sheet-tabs button.active,
-	.primary {
-		border-color: color-mix(in srgb, var(--color-accent) 50%, var(--color-border));
-		background: var(--color-accent-subtle);
-		color: var(--color-accent);
-	}
-
-	.symbols button:hover,
-	.sheet-tabs button:hover,
-	.secondary:hover,
-	.tiny:hover {
-		border-color: color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
-		background: color-mix(in srgb, var(--color-bg-overlay) 76%, var(--color-bg-surface));
-		transform: translateY(-1px);
-	}
-
-	.primary:hover {
-		box-shadow: var(--shadow-sm);
-		transform: translateY(-1px);
-	}
-
-	.primary,
-	.secondary {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-2);
-	}
-
-
-	label {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-2);
-	}
-
-	.sheet-tabs {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-	}
-
-	.add,
-	.tiny {
-		width: 32px;
-		padding: 0;
-	}
-
-	.add {
-		padding: 4px !important;
-	}
-</style>

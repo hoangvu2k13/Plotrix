@@ -21,86 +21,186 @@
 		ariaLabel?: string;
 		disabled?: boolean;
 	}>();
+
+	let open = $state(false);
+	let root: HTMLDivElement | null = null;
+	let activeIndex = $state(-1);
+
+	const selectedIndex = $derived(
+		Math.max(
+			0,
+			options.findIndex((option: SelectOption) => option.value === value)
+		)
+	);
+	const selectedOption = $derived(options[selectedIndex] ?? options[0] ?? null);
+
+	$effect(() => {
+		if (!open) {
+			activeIndex = selectedIndex;
+		}
+	});
+
+	function closeListbox(): void {
+		open = false;
+	}
+
+	function openListbox(nextIndex = selectedIndex): void {
+		if (disabled || options.length === 0) {
+			return;
+		}
+
+		open = true;
+		activeIndex = Math.max(0, Math.min(options.length - 1, nextIndex));
+	}
+
+	function toggleListbox(): void {
+		if (open) {
+			closeListbox();
+			return;
+		}
+
+		openListbox();
+	}
+
+	function commitSelection(index: number): void {
+		const option = options[index];
+
+		if (!option) {
+			return;
+		}
+
+		onChange(option.value);
+		closeListbox();
+	}
+
+	function moveHighlight(delta: number): void {
+		if (options.length === 0) {
+			return;
+		}
+
+		const start = activeIndex >= 0 ? activeIndex : selectedIndex;
+		activeIndex = (start + delta + options.length) % options.length;
+	}
+
+	function handleTriggerKeydown(event: KeyboardEvent): void {
+		if (disabled) {
+			return;
+		}
+
+		if (event.key === 'ArrowDown') {
+			event.preventDefault();
+			if (!open) {
+				openListbox(selectedIndex);
+				return;
+			}
+			moveHighlight(1);
+		}
+
+		if (event.key === 'ArrowUp') {
+			event.preventDefault();
+			if (!open) {
+				openListbox(selectedIndex);
+				return;
+			}
+			moveHighlight(-1);
+		}
+
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			if (!open) {
+				openListbox(selectedIndex);
+				return;
+			}
+			commitSelection(activeIndex >= 0 ? activeIndex : selectedIndex);
+		}
+
+		if (event.key === 'Escape' && open) {
+			event.preventDefault();
+			closeListbox();
+		}
+	}
+
+	function handleListboxKeydown(event: KeyboardEvent): void {
+		if (event.key === 'ArrowDown') {
+			event.preventDefault();
+			moveHighlight(1);
+		}
+
+		if (event.key === 'ArrowUp') {
+			event.preventDefault();
+			moveHighlight(-1);
+		}
+
+		if (event.key === 'Home') {
+			event.preventDefault();
+			activeIndex = 0;
+		}
+
+		if (event.key === 'End') {
+			event.preventDefault();
+			activeIndex = Math.max(0, options.length - 1);
+		}
+
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			commitSelection(activeIndex >= 0 ? activeIndex : selectedIndex);
+		}
+
+		if (event.key === 'Escape' || event.key === 'Tab') {
+			closeListbox();
+		}
+	}
+
+	function handleWindowPointerDown(event: PointerEvent): void {
+		if (open && root && event.target instanceof Node && !root.contains(event.target)) {
+			closeListbox();
+		}
+	}
 </script>
 
-<label class="select-shell" class:disabled>
-	<select
+<svelte:window onpointerdown={handleWindowPointerDown} />
+
+<div bind:this={root} class="select-shell" class:disabled class:open>
+	<button
+		type="button"
+		class="select-trigger"
 		aria-label={ariaLabel}
-		{value}
+		aria-expanded={open}
+		aria-haspopup="listbox"
 		{disabled}
-		onchange={(event) => onChange((event.currentTarget as HTMLSelectElement).value)}
+		onclick={toggleListbox}
+		onkeydown={handleTriggerKeydown}
 	>
-		{#each options as option (option.value)}
-			<option value={option.value}>{option.label}</option>
-		{/each}
-	</select>
+		<span class="select-label">{selectedOption?.label ?? ariaLabel}</span>
+		<Icon icon={ChevronDown} size="var(--icon-sm)" class="select-icon" />
+	</button>
 
-	<Icon icon={ChevronDown} size="var(--icon-sm)" class="select-icon" />
-</label>
-
-<style>
-	.select-shell {
-		position: relative;
-		display: inline-flex;
-		width: 100%;
-		min-width: 0;
-	}
-
-	.select-shell.disabled {
-		opacity: 0.55;
-	}
-
-	select {
-		width: 100%;
-		min-width: 0;
-		min-height: 42px;
-		padding: 0.75rem 2.5rem 0.75rem 0.875rem;
-		border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
-		border-radius: var(--radius-lg);
-		background:
-			linear-gradient(
-				180deg,
-				color-mix(in srgb, var(--color-bg-overlay) 96%, transparent),
-				color-mix(in srgb, var(--color-bg-surface) 94%, transparent)
-			);
-		color: var(--color-text-primary);
-		font-size: var(--text-sm);
-		font-weight: var(--font-weight-medium);
-		appearance: none;
-		cursor: pointer;
-		transition:
-			border-color var(--duration-fast) var(--ease-default),
-			background-color var(--duration-fast) var(--ease-default),
-			box-shadow var(--duration-fast) var(--ease-default),
-			transform var(--duration-fast) var(--ease-default);
-	}
-
-	select:disabled {
-		cursor: not-allowed;
-	}
-
-	select:hover {
-		border-color: color-mix(in srgb, var(--color-accent) 38%, var(--color-border));
-		background:
-			linear-gradient(
-				180deg,
-				color-mix(in srgb, var(--color-bg-overlay) 92%, transparent),
-				color-mix(in srgb, var(--color-bg-surface) 90%, transparent)
-			);
-	}
-
-	select:focus {
-		outline: none;
-		border-color: color-mix(in srgb, var(--color-accent) 62%, var(--color-border));
-		box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 16%, transparent);
-	}
-
-	:global(.select-icon) {
-		position: absolute;
-		top: 50%;
-		right: 12px;
-		color: var(--color-text-secondary);
-		transform: translateY(-50%);
-		pointer-events: none;
-	}
-</style>
+	{#if open}
+		<div class="select-popover">
+			<ul
+				class="select-list"
+				role="listbox"
+				tabindex="-1"
+				aria-label={ariaLabel}
+				onkeydown={handleListboxKeydown}
+			>
+				{#each options as option, index (option.value)}
+					<li>
+						<button
+							type="button"
+							class="select-option"
+							class:selected={option.value === value}
+							class:highlighted={index === activeIndex}
+							role="option"
+							aria-selected={option.value === value}
+							onmouseenter={() => (activeIndex = index)}
+							onclick={() => commitSelection(index)}
+						>
+							{option.label}
+						</button>
+					</li>
+				{/each}
+			</ul>
+		</div>
+	{/if}
+</div>
