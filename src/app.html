@@ -7,25 +7,9 @@
 			name="description"
 			content="Plotrix is a professional 2D math graph visualizer for exploring equations, exporting plots, and sharing graph states."
 		/>
-		<meta
-			http-equiv="Content-Security-Policy"
-			content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:;"
-		/>
 		<meta name="theme-color" content="#09090b" />
-		<script>
-			(() => {
-				const saved = localStorage.getItem('plotrix-theme') ?? 'system';
-				const resolved =
-					saved === 'system'
-						? window.matchMedia('(prefers-color-scheme: dark)').matches
-							? 'dark'
-							: 'light'
-						: saved;
+		<script src="/theme-init.js"></script>
 
-				document.documentElement.dataset.theme = resolved;
-				document.documentElement.style.colorScheme = resolved;
-			})();
-		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

@@ -106,7 +106,7 @@ export interface GraphSettings {
 	showIntersections: boolean;
 }
 
-interface GraphSnapshot {
+export interface GraphSnapshot {
 	version: 2;
 	equations: Array<{
 		id: string;
@@ -126,7 +126,12 @@ interface GraphSnapshot {
 	variables: Variable[];
 	dataSeries: DataSeries[];
 	regressionResults: RegressionResult[];
-	annotations?: GraphAnnotation[];
+	annotations: GraphAnnotation[];
+}
+
+interface ImportGraphOptions {
+	commitHistory?: boolean;
+	resetHistory?: boolean;
 }
 
 export interface GraphExporter {
@@ -573,6 +578,10 @@ function createSnapshot(graph: {
 	};
 }
 
+function stringifySnapshot(snapshot: GraphSnapshot, pretty = false): string {
+	return pretty ? JSON.stringify(snapshot, null, 2) : JSON.stringify(snapshot);
+}
+
 function deserializeSnapshot(source: string): GraphSnapshot {
 	const trimmed = source.trim();
 	let payload = trimmed;
@@ -743,6 +752,7 @@ export function createGraphState() {
 
 		analysisWorker.onmessage = (event: MessageEvent) => {
 			const data = event.data as {
+				error?: string;
 				type?: string;
 				key?: string;
 				result?: unknown;
@@ -750,6 +760,32 @@ export function createGraphState() {
 			};
 
 			if (!data || typeof data.type !== 'string' || typeof data.key !== 'string') {
+				return;
+			}
+
+			if (data.error) {
+				if (data.type === 'criticalPoints') {
+					pendingAnalysisRequests.delete(data.key);
+					criticalPointCache.set(data.key, []);
+					return;
+				}
+
+				if (data.type === 'intersections') {
+					pendingIntersectionRequests.delete(data.key);
+					intersectionCache.set(data.key, []);
+					return;
+				}
+
+				if (data.type === 'equationAnalysis') {
+					pendingAnalysisRequests.delete(data.key);
+					rememberAnalysisFailure(data.key);
+					return;
+				}
+
+				if (data.type === 'fitBounds') {
+					pendingFitRequests.delete(data.key);
+				}
+
 				return;
 			}
 
@@ -822,6 +858,9 @@ export function createGraphState() {
 		};
 
 		analysisWorker.onerror = () => {
+			resetAnalysisWorker();
+		};
+		analysisWorker.onmessageerror = () => {
 			resetAnalysisWorker();
 		};
 
@@ -994,7 +1033,7 @@ export function createGraphState() {
 	function commitHistory(kind = 'state', target = 'global', replaceCurrent = false): void {
 		clearPendingHistory();
 		const snapshot = createSnapshot(graph);
-		const serialized = JSON.stringify(snapshot);
+		const serialized = stringifySnapshot(snapshot);
 		const byteSize = serialized.length * 2;
 
 		if (serialized === lastHistoryJson) {
@@ -1023,6 +1062,24 @@ export function createGraphState() {
 		}
 
 		graph.historySize = history.length;
+		lastHistoryJson = serialized;
+		lastHistoryMeta = { kind, target, at: Date.now() };
+	}
+
+	function replaceHistorySnapshot(
+		snapshot: GraphSnapshot,
+		kind = 'state',
+		target = 'global'
+	): void {
+		clearPendingHistory();
+		const serialized = stringifySnapshot(snapshot);
+		const byteSize = serialized.length * 2;
+
+		history = [snapshot];
+		historyByteSizes = [byteSize];
+		historyBytes = byteSize;
+		graph.historyIndex = 0;
+		graph.historySize = 1;
 		lastHistoryJson = serialized;
 		lastHistoryMeta = { kind, target, at: Date.now() };
 	}
@@ -1090,7 +1147,6 @@ export function createGraphState() {
 		syncVariables();
 		lastVariableSnapshot = [];
 		bumpRenderVersion(true);
-		lastHistoryJson = JSON.stringify(snapshot);
 	}
 
 	function addEquation(raw = '', kind: EquationKind = 'cartesian'): PlotEquation {
@@ -1695,11 +1751,15 @@ export function createGraphState() {
 		return exporter ? exporter.toSVGString() : '';
 	}
 
-	function exportJSON(): string {
-		return JSON.stringify(createSnapshot(graph), null, 2);
+	function exportSnapshot(): GraphSnapshot {
+		return createSnapshot(graph);
 	}
 
-	async function importJSON(json: string): Promise<void> {
+	function exportJSON(pretty = true): string {
+		return stringifySnapshot(createSnapshot(graph), pretty);
+	}
+
+	async function importJSON(json: string, options: ImportGraphOptions = {}): Promise<void> {
 		if (json.length > MAX_URL_SNAPSHOT_BYTES * 8) {
 			throw new Error('Imported Plotrix snapshot exceeds the supported size limit.');
 		}
@@ -1716,7 +1776,15 @@ export function createGraphState() {
 			throw new Error('Imported Plotrix state is empty or invalid.');
 		}
 		await restoreSnapshot(snapshot);
-		commitHistory('import', 'snapshot');
+
+		if (options.resetHistory) {
+			replaceHistorySnapshot(snapshot, 'import', 'snapshot');
+			return;
+		}
+
+		if (options.commitHistory ?? true) {
+			commitHistory('import', 'snapshot');
+		}
 	}
 
 	function shareURL(): string | null {
@@ -1724,7 +1792,7 @@ export function createGraphState() {
 			return null;
 		}
 
-		const encoded = base64UrlEncode(exportJSON());
+		const encoded = base64UrlEncode(exportJSON(false));
 		const url = `${window.location.origin}${window.location.pathname}#plotrix=${encoded}`;
 
 		if (encoded.length > MAX_URL_SNAPSHOT_BYTES * 2 || url.length > MAX_URL_SNAPSHOT_BYTES * 2) {
@@ -1744,6 +1812,7 @@ export function createGraphState() {
 
 		graph.historyIndex -= 1;
 		await restoreSnapshot(history[graph.historyIndex]!);
+		lastHistoryJson = stringifySnapshot(history[graph.historyIndex]!);
 	}
 
 	async function redoHistory(): Promise<void> {
@@ -1755,6 +1824,7 @@ export function createGraphState() {
 
 		graph.historyIndex += 1;
 		await restoreSnapshot(history[graph.historyIndex]!);
+		lastHistoryJson = stringifySnapshot(history[graph.historyIndex]!);
 	}
 
 	function attachExporter(next: GraphExporter | null): void {
@@ -1821,6 +1891,7 @@ export function createGraphState() {
 		attachExporter,
 		destroy,
 		seedStarterEquations,
+		exportSnapshot,
 		exportPNG,
 		exportSVG,
 		exportJSON,

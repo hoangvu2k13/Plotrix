@@ -20,7 +20,7 @@ export default defineConfig({
 		sveltekit(),
 		VitePWA({
 			registerType: 'autoUpdate',
-			injectRegister: 'inline',
+			injectRegister: 'script',
 			includeAssets: [
 				'brand/icon.svg',
 				'brand/maskable.svg',
@@ -125,6 +125,9 @@ export default defineConfig({
 			'mathjs',
 			'katex',
 			'nanoid',
+			'firebase/app',
+			'firebase/auth',
+			'firebase/firestore',
 			'@codemirror/view',
 			'@codemirror/state',
 			'@codemirror/lang-javascript'
@@ -171,6 +174,10 @@ export default defineConfig({
 
 					if (id.includes('node_modules/katex')) {
 						return 'math-typesetting';
+					}
+
+					if (id.includes('node_modules/firebase') || id.includes('node_modules/@firebase')) {
+						return 'firebase';
 					}
 
 					if (id.includes('node_modules/@lucide') || id.includes('node_modules/phosphor-svelte')) {

@@ -44,6 +44,7 @@
 		"@fontsource-variable/jetbrains-mono": "^5.2.8",
 		"@lucide/svelte": "^1.7.0",
 		"color-thief-browser": "^2.0.2",
+		"firebase": "^12.11.0",
 		"katex": "^0.16.43",
 		"mathjs": "^15.1.1",
 		"nanoid": "^5.1.7",

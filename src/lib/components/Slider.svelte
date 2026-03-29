@@ -32,9 +32,6 @@
 	onMount(syncFill);
 
 	$effect(() => {
-		value;
-		min;
-		max;
 		syncFill();
 	});
 </script>

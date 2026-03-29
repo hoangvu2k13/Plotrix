@@ -9,6 +9,7 @@
 		isOpen: () => boolean;
 	};
 
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const openPickers = new Set<PickerRegistration>();
 	let pointerListenerAttached = false;
 
@@ -82,7 +83,6 @@
 	}
 
 	$effect(() => {
-		value;
 		hexValue = value;
 		invalidHex = false;
 	});
@@ -135,7 +135,7 @@
 	{#if open}
 		<div class="popover" role="dialog" aria-label={`${label} options`}>
 			<div class="grid" role="listbox" aria-label="Preset colors">
-				{#each PRESET_COLORS as color}
+				{#each PRESET_COLORS as color (color)}
 					<button
 						type="button"
 						class:selected={color.toLowerCase() === value.toLowerCase()}

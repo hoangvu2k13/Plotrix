@@ -16,7 +16,9 @@
 	let currentResult = $state<RegressionResult | null>(null);
 	let equationHtml = $state('');
 	let equationRenderToken = 0;
+	let errorMessage = $state<string | null>(null);
 	let pending = $state(false);
+	let pendingKey = $state<string | null>(null);
 	let regressionWorker: Worker | null = null;
 
 	function ensureRegressionWorker(): Worker | null {
@@ -29,11 +31,27 @@
 		});
 		regressionWorker.onmessage = (event: MessageEvent) => {
 			const data = event.data as {
+				error?: string;
+				key?: string;
 				type?: string;
 				result?: RegressionResult & { coefficients?: Float64Array | number[] };
 			};
 
-			if (data?.type !== 'fit' || !data.result) {
+			if (data?.type !== 'fit' || typeof data.key !== 'string' || data.key !== pendingKey) {
+				return;
+			}
+
+			if (data.error) {
+				pending = false;
+				pendingKey = null;
+				errorMessage = data.error;
+				return;
+			}
+
+			if (!data.result) {
+				pending = false;
+				pendingKey = null;
+				errorMessage = 'Regression fitting returned no result.';
 				return;
 			}
 
@@ -45,6 +63,18 @@
 			currentResult = normalized;
 			graph.upsertRegressionResult(normalized);
 			pending = false;
+			pendingKey = null;
+			errorMessage = null;
+		};
+		regressionWorker.onerror = () => {
+			pending = false;
+			pendingKey = null;
+			errorMessage = 'Regression fitting failed in the background worker.';
+		};
+		regressionWorker.onmessageerror = () => {
+			pending = false;
+			pendingKey = null;
+			errorMessage = 'Regression fitting returned an unreadable worker response.';
 		};
 
 		return regressionWorker;
@@ -101,13 +131,22 @@
 	function fit(): void {
 		const worker = ensureRegressionWorker();
 		if (!dataset || !worker) return;
+
+		if (dataset.x.length < 2 || dataset.x.length !== dataset.y.length) {
+			errorMessage = 'Regression requires at least two valid numeric data points.';
+			return;
+		}
+
+		const key = `${model}:${Date.now()}`;
 		pending = true;
+		pendingKey = key;
+		errorMessage = null;
 		const x = new Float64Array(dataset.x);
 		const y = new Float64Array(dataset.y);
 		worker.postMessage(
 			{
 				type: 'fit',
-				key: `${model}:${Date.now()}`,
+				key,
 				model,
 				x,
 				y,
@@ -176,6 +215,10 @@
 
 	{#if !dataset}
 		<p class="hint">Plot or enter at least two numeric data points to enable regression.</p>
+	{/if}
+
+	{#if errorMessage}
+		<p class="hint danger" role="alert">{errorMessage}</p>
 	{/if}
 
 	{#if currentResult}

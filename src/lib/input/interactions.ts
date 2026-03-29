@@ -322,11 +322,7 @@ export class InteractionManager {
 				continue;
 			}
 
-			const y = evaluateCartesianAt(
-				equation.compiledExpression ?? equation.compiled,
-				mathX,
-				scope
-			);
+			const y = evaluateCartesianAt(equation.compiledExpression ?? equation.compiled, mathX, scope);
 
 			if (y === null) {
 				continue;

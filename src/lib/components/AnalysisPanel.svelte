@@ -8,6 +8,7 @@
 	import type { GraphState } from '$stores/graph.svelte';
 	import type { UiState } from '$stores/ui.svelte';
 	import { getCachedKatex } from '$utils/katex-cache';
+	import { copyText } from '$utils/download';
 	import { renderKatex } from '$utils/katexRenderer';
 	import { clamp, formatCoordinate } from '$utils/format';
 
@@ -227,7 +228,7 @@
 			`Integral: ${report.integral}`,
 			`Curvature: ${report.curvature}`
 		].join('\n');
-		await navigator.clipboard.writeText(text);
+		await copyText(text);
 		ui.pushToast({
 			title: 'Analysis copied',
 			description: 'The analysis report is now on your clipboard.',
@@ -307,414 +308,424 @@
 		>
 			<button type="button" aria-label="Resize analysis panel" onmousedown={startResize}></button>
 		</div>
-		<header class="header">
-			<div class="swatch" style={`--swatch:${equation.color}`}></div>
-			<div class="title">
-				<!-- eslint-disable-next-line svelte/no-at-html-tags -->
-				<div class="katex">{@html equationHtml}</div>
-				<p>Analysis Report</p>
-			</div>
-			<div class="header-actions">
-				<button type="button" onclick={copyReport}>
-					<Icon icon={ClipboardCopy} size="var(--icon-sm)" class="header-icon" />
-					<span>Copy report</span>
-				</button>
-				<button
-					type="button"
-					aria-label="Close analysis panel"
-					onclick={() => ui.setActiveAnalysisEquationId(null)}
-				>
-					<Icon icon={X} size="var(--icon-sm)" class="header-icon" />
-				</button>
-			</div>
-		</header>
-
-		{#if loading}
-			<div class="loading">
-				<div></div>
-				<div></div>
-				<div></div>
-				<div></div>
-			</div>
-		{:else if errorMessage || !report}
-			<p class="muted">{errorMessage ?? 'Analysis is unavailable for this equation.'}</p>
-		{:else}
-			<div class="sections">
-				{#if report.partial}
-					<p class="partial-note">Showing critical points first while the full report finishes.</p>
-				{/if}
-				<section>
+		<div class="inner">
+			<header class="header">
+				<div class="swatch" style={`--swatch:${equation.color}`}></div>
+				<div class="title">
+					<!-- eslint-disable-next-line svelte/no-at-html-tags -->
+					<div class="katex">{@html equationHtml}</div>
+					<p>Analysis Report</p>
+				</div>
+				<div class="header-actions">
+					<button type="button" onclick={copyReport}>
+						<Icon icon={ClipboardCopy} size="var(--icon-sm)" class="header-icon" />
+						<span>Copy report</span>
+					</button>
 					<button
 						type="button"
-						class="accordion"
-						onclick={() => (sections.domain = !sections.domain)}
+						aria-label="Close analysis panel"
+						onclick={() => ui.setActiveAnalysisEquationId(null)}
 					>
-						<span>Domain & Range</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.domain ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
+						<Icon icon={X} size="var(--icon-sm)" class="header-icon" />
 					</button>
-					{#if sections.domain}
-						<div class="rows rows-domain mono">
-							<div>
-								<strong>Domain</strong>
-								<span>{summarizeText(report.domain, showFullDomain)}</span>
-							</div>
-							{#if report.domain.length > DOMAIN_RANGE_PREVIEW_CHARS}
-								<button
-									type="button"
-									class="inline-toggle"
-									onclick={() => (showFullDomain = !showFullDomain)}
-								>
-									{showFullDomain ? 'Show less' : '... more'}
-								</button>
-							{/if}
-							<div>
-								<strong>Range</strong>
-								<span>{summarizeText(report.range, showFullRange)}</span>
-							</div>
-							{#if report.range.length > DOMAIN_RANGE_PREVIEW_CHARS}
-								<button
-									type="button"
-									class="inline-toggle"
-									onclick={() => (showFullRange = !showFullRange)}
-								>
-									{showFullRange ? 'Show less' : '... more'}
-								</button>
-							{/if}
-						</div>
+				</div>
+			</header>
+
+			{#if loading}
+				<div class="loading">
+					<div></div>
+					<div></div>
+					<div></div>
+					<div></div>
+				</div>
+			{:else if errorMessage || !report}
+				<p class="muted">{errorMessage ?? 'Analysis is unavailable for this equation.'}</p>
+			{:else}
+				<div class="sections">
+					{#if report.partial}
+						<p class="partial-note">
+							Showing critical points first while the full report finishes.
+						</p>
 					{/if}
-				</section>
-
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.zeros = !sections.zeros)}
-					>
-						<span>Zeros</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.zeros ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.zeros}
-						<div class="pills">
-							{#if visibleZeros.length}
-								{#each visibleZeros as zero (`${zero}`)}
-									<button type="button" class="pill" onclick={() => focusPoint(zero, 0)}
-										>x = {zero.toPrecision(3)}</button
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.domain = !sections.domain)}
+						>
+							<span>Domain & Range</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.domain ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.domain}
+							<div class="rows rows-domain mono">
+								<div>
+									<strong>Domain</strong>
+									<span>{summarizeText(report.domain, showFullDomain)}</span>
+								</div>
+								{#if report.domain.length > DOMAIN_RANGE_PREVIEW_CHARS}
+									<button
+										type="button"
+										class="inline-toggle"
+										onclick={() => (showFullDomain = !showFullDomain)}
 									>
-								{/each}
-								{#if report.zeros.length > MAX_PILLS_VISIBLE}
-									<button type="button" class="pill" onclick={() => (showAllZeros = !showAllZeros)}>
-										{showAllZeros
-											? 'Show fewer'
-											: `... ${report.zeros.length - MAX_PILLS_VISIBLE} more`}
+										{showFullDomain ? 'Show less' : '... more'}
 									</button>
 								{/if}
-							{:else}
-								<p class="muted">No zeros in visible range</p>
-							{/if}
-						</div>
-					{/if}
-				</section>
+								<div>
+									<strong>Range</strong>
+									<span>{summarizeText(report.range, showFullRange)}</span>
+								</div>
+								{#if report.range.length > DOMAIN_RANGE_PREVIEW_CHARS}
+									<button
+										type="button"
+										class="inline-toggle"
+										onclick={() => (showFullRange = !showFullRange)}
+									>
+										{showFullRange ? 'Show less' : '... more'}
+									</button>
+								{/if}
+							</div>
+						{/if}
+					</section>
 
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.values = !sections.values)}
-					>
-						<span>Table of Values</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.values ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.values}
-						<div class="values-controls">
-							<label>
-								<span>Start</span>
-								<input
-									type="number"
-									bind:value={tableRange.start}
-									onfocus={() => (editingTableRange = true)}
-									onblur={() => (editingTableRange = false)}
-								/>
-							</label>
-							<label>
-								<span>End</span>
-								<input
-									type="number"
-									bind:value={tableRange.end}
-									onfocus={() => (editingTableRange = true)}
-									onblur={() => (editingTableRange = false)}
-								/>
-							</label>
-							<label>
-								<span>Step</span>
-								<input
-									type="number"
-									bind:value={tableRange.step}
-									onfocus={() => (editingTableRange = true)}
-									onblur={() => (editingTableRange = false)}
-								/>
-							</label>
-						</div>
-						<div class="values-table-wrap">
-							<table class="table">
-								<thead>
-									<tr><th>x</th><th>f(x)</th></tr>
-								</thead>
-								<tbody>
-									{#if valueRows.length}
-										{#each valueRows as row (`${row.x}`)}
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.zeros = !sections.zeros)}
+						>
+							<span>Zeros</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.zeros ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.zeros}
+							<div class="pills">
+								{#if visibleZeros.length}
+									{#each visibleZeros as zero (`${zero}`)}
+										<button type="button" class="pill" onclick={() => focusPoint(zero, 0)}
+											>x = {zero.toPrecision(3)}</button
+										>
+									{/each}
+									{#if report.zeros.length > MAX_PILLS_VISIBLE}
+										<button
+											type="button"
+											class="pill"
+											onclick={() => (showAllZeros = !showAllZeros)}
+										>
+											{showAllZeros
+												? 'Show fewer'
+												: `... ${report.zeros.length - MAX_PILLS_VISIBLE} more`}
+										</button>
+									{/if}
+								{:else}
+									<p class="muted">No zeros in visible range</p>
+								{/if}
+							</div>
+						{/if}
+					</section>
+
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.values = !sections.values)}
+						>
+							<span>Table of Values</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.values ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.values}
+							<div class="values-controls">
+								<label>
+									<span>Start</span>
+									<input
+										type="number"
+										bind:value={tableRange.start}
+										onfocus={() => (editingTableRange = true)}
+										onblur={() => (editingTableRange = false)}
+									/>
+								</label>
+								<label>
+									<span>End</span>
+									<input
+										type="number"
+										bind:value={tableRange.end}
+										onfocus={() => (editingTableRange = true)}
+										onblur={() => (editingTableRange = false)}
+									/>
+								</label>
+								<label>
+									<span>Step</span>
+									<input
+										type="number"
+										bind:value={tableRange.step}
+										onfocus={() => (editingTableRange = true)}
+										onblur={() => (editingTableRange = false)}
+									/>
+								</label>
+							</div>
+							<div class="values-table-wrap">
+								<table class="table">
+									<thead>
+										<tr><th>x</th><th>f(x)</th></tr>
+									</thead>
+									<tbody>
+										{#if valueRows.length}
+											{#each valueRows as row (`${row.x}`)}
+												<tr>
+													<td
+														><button
+															type="button"
+															class="table-button"
+															onclick={() => focusPoint(row.x, row.y ?? 0)}
+														>
+															{formatCoordinate(row.x)}
+														</button></td
+													>
+													<td>{row.y === null ? 'undefined' : formatCoordinate(row.y)}</td>
+												</tr>
+											{/each}
+										{:else}
+											<tr>
+												<td colspan="2" class="muted">Enter a finite start, end, and step.</td>
+											</tr>
+										{/if}
+									</tbody>
+								</table>
+							</div>
+							{#if valueRows.length >= MAX_VALUE_ROWS}
+								<p class="muted">Showing the first {MAX_VALUE_ROWS} rows for performance.</p>
+							{/if}
+						{/if}
+					</section>
+
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.symmetry = !sections.symmetry)}
+						>
+							<span>Symmetry & Period</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.symmetry ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.symmetry}
+							<div class="rows">
+								<div>
+									<strong>Symmetry</strong><span
+										>{report.isEven ? 'Even' : report.isOdd ? 'Odd' : 'None'}</span
+									>
+								</div>
+								<div>
+									<strong>Period</strong><span
+										>{report.period ? `T = ${report.period.toPrecision(3)}` : 'None detected'}</span
+									>
+								</div>
+							</div>
+						{/if}
+					</section>
+
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.asymptotes = !sections.asymptotes)}
+						>
+							<span>Asymptotes</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.asymptotes ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.asymptotes}
+							<div class="pills">
+								{#if visibleVerticalAsymptotes.length}
+									{#each visibleVerticalAsymptotes as value (`${value}`)}
+										<button
+											type="button"
+											class="pill"
+											onclick={() => focusAsymptote(value)}
+											onmouseenter={() => ui.setHighlightedAsymptotes([value])}
+											onfocus={() => ui.setHighlightedAsymptotes([value])}
+											onmouseleave={() => ui.setHighlightedAsymptotes([])}
+											onblur={() => ui.setHighlightedAsymptotes([])}
+										>
+											x = {value.toPrecision(4)}
+										</button>
+									{/each}
+									{#if report.verticalAsymptotes.length > MAX_ASYMPTOTES_VISIBLE}
+										<button
+											type="button"
+											class="pill"
+											onclick={() => (showAllAsymptotes = !showAllAsymptotes)}
+										>
+											{showAllAsymptotes
+												? 'Show fewer'
+												: `... ${report.verticalAsymptotes.length - MAX_ASYMPTOTES_VISIBLE} more`}
+										</button>
+									{/if}
+								{:else}
+									<p class="muted">None</p>
+								{/if}
+							</div>
+							<p class="muted">
+								{report.horizontalAsymptotes.left !== null ||
+								report.horizontalAsymptotes.right !== null
+									? `y → ${report.horizontalAsymptotes.left?.toPrecision(3) ?? 'none'} as x → -∞ · y → ${report.horizontalAsymptotes.right?.toPrecision(3) ?? 'none'} as x → +∞`
+									: 'None'}
+							</p>
+						{/if}
+					</section>
+
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.critical = !sections.critical)}
+						>
+							<span>Critical Points</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.critical ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.critical}
+							{#if visibleCriticalPoints.length}
+								<table class="table">
+									<thead>
+										<tr><th>Kind</th><th>x</th><th>y</th></tr>
+									</thead>
+									<tbody>
+										{#each visibleCriticalPoints as point (`${point.kind}:${point.x}:${point.y}`)}
 											<tr>
 												<td
 													><button
 														type="button"
 														class="table-button"
-														onclick={() => focusPoint(row.x, row.y ?? 0)}
-													>
-														{formatCoordinate(row.x)}
-													</button></td
+														onclick={() => focusPoint(point.x, point.y)}>{point.kind}</button
+													></td
 												>
-												<td>{row.y === null ? 'undefined' : formatCoordinate(row.y)}</td>
+												<td>{point.x.toPrecision(3)}</td>
+												<td>{point.y.toPrecision(3)}</td>
 											</tr>
 										{/each}
-									{:else}
-										<tr>
-											<td colspan="2" class="muted">Enter a finite start, end, and step.</td>
-										</tr>
-									{/if}
-								</tbody>
-							</table>
-						</div>
-						{#if valueRows.length >= MAX_VALUE_ROWS}
-							<p class="muted">Showing the first {MAX_VALUE_ROWS} rows for performance.</p>
-						{/if}
-					{/if}
-				</section>
-
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.symmetry = !sections.symmetry)}
-					>
-						<span>Symmetry & Period</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.symmetry ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.symmetry}
-						<div class="rows">
-							<div>
-								<strong>Symmetry</strong><span
-									>{report.isEven ? 'Even' : report.isOdd ? 'Odd' : 'None'}</span
-								>
-							</div>
-							<div>
-								<strong>Period</strong><span
-									>{report.period ? `T = ${report.period.toPrecision(3)}` : 'None detected'}</span
-								>
-							</div>
-						</div>
-					{/if}
-				</section>
-
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.asymptotes = !sections.asymptotes)}
-					>
-						<span>Asymptotes</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.asymptotes ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.asymptotes}
-						<div class="pills">
-							{#if visibleVerticalAsymptotes.length}
-								{#each visibleVerticalAsymptotes as value (`${value}`)}
+									</tbody>
+								</table>
+								{#if report.criticalPoints.length > MAX_CRITICAL_POINTS_VISIBLE}
 									<button
 										type="button"
-										class="pill"
-										onclick={() => focusAsymptote(value)}
-										onmouseenter={() => ui.setHighlightedAsymptotes([value])}
-										onfocus={() => ui.setHighlightedAsymptotes([value])}
-										onmouseleave={() => ui.setHighlightedAsymptotes([])}
-										onblur={() => ui.setHighlightedAsymptotes([])}
+										class="inline-toggle"
+										onclick={() => (showAllCriticalPoints = !showAllCriticalPoints)}
 									>
-										x = {value.toPrecision(4)}
-									</button>
-								{/each}
-								{#if report.verticalAsymptotes.length > MAX_ASYMPTOTES_VISIBLE}
-									<button
-										type="button"
-										class="pill"
-										onclick={() => (showAllAsymptotes = !showAllAsymptotes)}
-									>
-										{showAllAsymptotes
-											? 'Show fewer'
-											: `... ${report.verticalAsymptotes.length - MAX_ASYMPTOTES_VISIBLE} more`}
+										{showAllCriticalPoints
+											? 'Show fewer critical points'
+											: `... ${report.criticalPoints.length - MAX_CRITICAL_POINTS_VISIBLE} more critical points`}
 									</button>
 								{/if}
 							{:else}
-								<p class="muted">None</p>
+								<p class="muted">No critical points were detected in the current viewport.</p>
 							{/if}
-						</div>
-						<p class="muted">
-							{report.horizontalAsymptotes.left !== null ||
-							report.horizontalAsymptotes.right !== null
-								? `y → ${report.horizontalAsymptotes.left?.toPrecision(3) ?? 'none'} as x → -∞ · y → ${report.horizontalAsymptotes.right?.toPrecision(3) ?? 'none'} as x → +∞`
-								: 'None'}
-						</p>
-					{/if}
-				</section>
+						{/if}
+					</section>
 
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.critical = !sections.critical)}
-					>
-						<span>Critical Points</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.critical ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.critical}
-						{#if visibleCriticalPoints.length}
-							<table class="table">
-								<thead>
-									<tr><th>Kind</th><th>x</th><th>y</th></tr>
-								</thead>
-								<tbody>
-									{#each visibleCriticalPoints as point (`${point.kind}:${point.x}:${point.y}`)}
-										<tr>
-											<td
-												><button
-													type="button"
-													class="table-button"
-													onclick={() => focusPoint(point.x, point.y)}>{point.kind}</button
-												></td
-											>
-											<td>{point.x.toPrecision(3)}</td>
-											<td>{point.y.toPrecision(3)}</td>
-										</tr>
-									{/each}
-								</tbody>
-							</table>
-							{#if report.criticalPoints.length > MAX_CRITICAL_POINTS_VISIBLE}
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.derivative = !sections.derivative)}
+						>
+							<span>Derivative</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.derivative ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.derivative}
+							<p class="mono">{report.derivative}</p>
+							{#if report.derivativeExpression}
 								<button
 									type="button"
-									class="inline-toggle"
-									onclick={() => (showAllCriticalPoints = !showAllCriticalPoints)}
+									class="pill"
+									onclick={() =>
+										addAnalysisEquation(report?.derivativeExpression ?? equation.raw, 'Derivative')}
+									>Add derivative to graph</button
 								>
-									{showAllCriticalPoints
-										? 'Show fewer critical points'
-										: `... ${report.criticalPoints.length - MAX_CRITICAL_POINTS_VISIBLE} more critical points`}
-								</button>
 							{/if}
-						{:else}
-							<p class="muted">No critical points were detected in the current viewport.</p>
 						{/if}
-					{/if}
-				</section>
+					</section>
 
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.derivative = !sections.derivative)}
-					>
-						<span>Derivative</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.derivative ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.derivative}
-						<p class="mono">{report.derivative}</p>
-						{#if report.derivativeExpression}
-							<button
-								type="button"
-								class="pill"
-								onclick={() =>
-									addAnalysisEquation(report?.derivativeExpression ?? equation.raw, 'Derivative')}
-								>Add derivative to graph</button
-							>
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.integral = !sections.integral)}
+						>
+							<span>Integral</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.integral ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.integral}
+							<p class="mono">{report.integral}</p>
+							{#if report.integralExpression}
+								<button
+									type="button"
+									class="pill"
+									onclick={() =>
+										addAnalysisEquation(
+											report?.integralExpression ?? equation.raw,
+											'Antiderivative'
+										)}>Add antiderivative to graph</button
+								>
+							{/if}
 						{/if}
-					{/if}
-				</section>
+					</section>
 
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.integral = !sections.integral)}
-					>
-						<span>Integral</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.integral ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.integral}
-						<p class="mono">{report.integral}</p>
-						{#if report.integralExpression}
-							<button
-								type="button"
-								class="pill"
-								onclick={() =>
-									addAnalysisEquation(report?.integralExpression ?? equation.raw, 'Antiderivative')}
-								>Add antiderivative to graph</button
-							>
-						{/if}
-					{/if}
-				</section>
-
-				<section>
-					<button
-						type="button"
-						class="accordion"
-						onclick={() => (sections.behavior = !sections.behavior)}
-					>
-						<span>Behavior Summary</span>
-						<Icon
-							icon={ChevronDown}
-							size="var(--icon-md)"
-							class={!sections.behavior ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
-						/>
-					</button>
-					{#if sections.behavior}
-						<div class="rows">
-							<div>
-								<strong>Monotone</strong><span>{report.isMonotone ? 'Yes' : 'Partial'}</span>
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.behavior = !sections.behavior)}
+						>
+							<span>Behavior Summary</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={!sections.behavior ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+							/>
+						</button>
+						{#if sections.behavior}
+							<div class="rows">
+								<div>
+									<strong>Monotone</strong><span>{report.isMonotone ? 'Yes' : 'Partial'}</span>
+								</div>
+								<div>
+									<strong>Continuous</strong><span>{report.isContinuous ? 'Yes' : 'No'}</span>
+								</div>
+								<div><strong>Curvature</strong><span>{report.curvature}</span></div>
 							</div>
-							<div>
-								<strong>Continuous</strong><span>{report.isContinuous ? 'Yes' : 'No'}</span>
-							</div>
-							<div><strong>Curvature</strong><span>{report.curvature}</span></div>
-						</div>
-					{/if}
-				</section>
-			</div>
-		{/if}
+						{/if}
+					</section>
+				</div>
+			{/if}
+		</div>
 	</div>
 {/if}

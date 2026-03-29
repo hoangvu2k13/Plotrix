@@ -9,7 +9,8 @@
 	let { graph } = $props<{ graph: GraphState }>();
 
 	let collapsed = $state(false);
-	let running = $state(new Set<string>());
+	let running = $state<string[]>([]);
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const frames = new Map<string, number>();
 
 	function toggleAnimation(variable: Variable): void {
@@ -18,7 +19,7 @@
 		if (active) {
 			cancelAnimationFrame(active);
 			frames.delete(variable.name);
-			running = new Set([...running].filter((name) => name !== variable.name));
+			running = running.filter((name) => name !== variable.name);
 			return;
 		}
 
@@ -39,7 +40,7 @@
 		};
 
 		frames.set(variable.name, requestAnimationFrame(step));
-		running = new Set(running).add(variable.name);
+		running = [...running, variable.name];
 	}
 
 	onDestroy(() => {
@@ -92,12 +93,12 @@
 							<button
 								type="button"
 								class="play"
-								aria-label={running.has(variable.name)
+								aria-label={running.includes(variable.name)
 									? `Stop animation for ${variable.name}`
 									: `Play animation for ${variable.name}`}
 								onclick={() => toggleAnimation(variable)}
 							>
-								{#if running.has(variable.name)}
+								{#if running.includes(variable.name)}
 									<Icon icon={Square} size="var(--icon-sm)" class="play-icon" />
 								{:else}
 									<Icon icon={Play} size="var(--icon-sm)" class="play-icon" />

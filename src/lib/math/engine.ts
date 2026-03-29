@@ -843,9 +843,7 @@ function parseImplicit(raw: string): ParsedEquationResult {
 	const parsed = parseNode(`(${lhsRaw}) - (${rhsRaw})`);
 	return {
 		node: parsed.node,
-		compiledExpression: parsed.node
-			? compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`)
-			: null,
+		compiledExpression: parsed.node ? compileNativeExpression(`(${lhsRaw}) - (${rhsRaw})`) : null,
 		error: parsed.error,
 		kind: 'implicit',
 		isParametric: false,

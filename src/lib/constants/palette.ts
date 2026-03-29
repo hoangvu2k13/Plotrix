@@ -9,9 +9,4 @@ export const COLOR_PALETTE = [
 	'#ec4899'
 ] as const;
 
-export const EXTENDED_COLOR_PALETTE = [
-	...COLOR_PALETTE,
-	'#22c55e',
-	'#eab308',
-	'#64748b'
-] as const;
+export const EXTENDED_COLOR_PALETTE = [...COLOR_PALETTE, '#22c55e', '#eab308', '#64748b'] as const;

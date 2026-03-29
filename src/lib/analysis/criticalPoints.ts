@@ -46,12 +46,7 @@ function thirdDerivative(f: (x: number) => number, x: number): number | null {
 	return (right - left) / (2 * step);
 }
 
-function pushPoint(
-	points: CriticalPoint[],
-	x: number,
-	y: number,
-	kind: CriticalPointKind
-): void {
+function pushPoint(points: CriticalPoint[], x: number, y: number, kind: CriticalPointKind): void {
 	if (!Number.isFinite(x) || !Number.isFinite(y)) {
 		return;
 	}

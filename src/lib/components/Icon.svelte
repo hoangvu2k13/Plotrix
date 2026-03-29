@@ -75,22 +75,22 @@
 
 {#if library === 'lucide'}
 	<LucideComponent
-		size={size}
+		{size}
 		color="currentColor"
 		strokeWidth={1.7}
 		class={className}
-		{...(label
+		{...label
 			? { 'aria-label': label, 'aria-hidden': 'false' as const, role: 'img' }
-			: { 'aria-hidden': 'true' as const })}
+			: { 'aria-hidden': 'true' as const }}
 	/>
 {:else}
 	<PhosphorComponent
-		size={size}
+		{size}
 		color="currentColor"
 		weight="regular"
 		class={className}
-		{...(label
+		{...label
 			? { 'aria-label': label, 'aria-hidden': 'false' as const, role: 'img' }
-			: { 'aria-hidden': 'true' as const })}
+			: { 'aria-hidden': 'true' as const }}
 	/>
 {/if}

@@ -44,7 +44,7 @@ export function bisect(
 	let a = left;
 	let b = right;
 	let fa = evaluate(a);
-	let fb = evaluate(b);
+	const fb = evaluate(b);
 
 	if (fa === null || fb === null) {
 		return null;
@@ -63,7 +63,6 @@ export function bisect(
 			fa = fm;
 		} else {
 			b = midpoint;
-			fb = fm;
 		}
 	}
 

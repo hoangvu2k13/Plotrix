@@ -42,8 +42,6 @@
 	let previewRenderToken = 0;
 	let deleteRevealed = $state(false);
 	let swipeStart: { x: number; y: number } | null = $state(null);
-	let wasActive = false;
-
 	const active = $derived(ui.activeEquationId === equation.id);
 	const isSelected = $derived(ui.selectedEquationIds.has(equation.id));
 	const canAnalyze = $derived(equation.kind === 'cartesian' && !equation.errorMessage);
@@ -69,14 +67,6 @@
 		implicit: 'x^2 + y^2 = 9',
 		inequality: 'y <= x^2'
 	};
-
-	$effect(() => {
-		if (active && !wasActive) {
-			expanded = true;
-		}
-
-		wasActive = active;
-	});
 
 	$effect(() => {
 		void equation.errorMessage;
@@ -219,7 +209,6 @@
 	ondragstart={handleDragStart}
 	ondragover={(event) => event.preventDefault()}
 	ondrop={handleDrop}
-	onfocusin={() => setActive()}
 >
 	<div
 		class="summary-row"

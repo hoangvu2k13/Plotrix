@@ -47,15 +47,15 @@
 	});
 
 	const grouped = $derived.by(() => {
-		const groups = new Map<string, CommandAction[]>();
+		const groups: Record<string, CommandAction[]> = {};
 
 		for (const action of filtered) {
-			const current = groups.get(action.category) ?? [];
+			const current = groups[action.category] ?? [];
 			current.push(action);
-			groups.set(action.category, current);
+			groups[action.category] = current;
 		}
 
-		return [...groups.entries()];
+		return Object.entries(groups);
 	});
 
 	$effect(() => {
@@ -175,7 +175,7 @@
 
 				<div class="results">
 					{#if filtered.length}
-						{#each grouped as [category, items]}
+						{#each grouped as [category, items] (category)}
 							<div class="group">
 								<p class="group-label">{category}</p>
 								{#each items as action (action.id)}

@@ -1,7 +1,47 @@
 <script lang="ts">
 	import { ChevronDown } from '@lucide/svelte';
+	import { onDestroy, onMount } from 'svelte';
 
 	import Icon from '$components/Icon.svelte';
+
+	type SelectRegistration = {
+		close: () => void;
+		isOpen: () => boolean;
+		root: () => HTMLDivElement | null;
+	};
+
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
+	const openSelects = new Set<SelectRegistration>();
+	let pointerListenerAttached = false;
+
+	function handleSharedPointerDown(event: PointerEvent): void {
+		for (const registration of openSelects) {
+			const target = event.target;
+			const root = registration.root();
+
+			if (registration.isOpen() && root && target instanceof Node && !root.contains(target)) {
+				registration.close();
+			}
+		}
+	}
+
+	function ensureSharedPointerListener(): void {
+		if (pointerListenerAttached || typeof document === 'undefined') {
+			return;
+		}
+
+		document.addEventListener('pointerdown', handleSharedPointerDown);
+		pointerListenerAttached = true;
+	}
+
+	function maybeRemoveSharedPointerListener(): void {
+		if (!pointerListenerAttached || openSelects.size > 0 || typeof document === 'undefined') {
+			return;
+		}
+
+		document.removeEventListener('pointerdown', handleSharedPointerDown);
+		pointerListenerAttached = false;
+	}
 
 	export interface SelectOption {
 		value: string;
@@ -25,6 +65,7 @@
 	let open = $state(false);
 	let root: HTMLDivElement | null = null;
 	let activeIndex = $state(-1);
+	let registration: SelectRegistration | null = null;
 
 	const selectedIndex = $derived(
 		Math.max(
@@ -38,6 +79,21 @@
 		if (!open) {
 			activeIndex = selectedIndex;
 		}
+	});
+
+	$effect(() => {
+		if (!registration) {
+			return;
+		}
+
+		if (open) {
+			openSelects.add(registration);
+			ensureSharedPointerListener();
+			return;
+		}
+
+		openSelects.delete(registration);
+		maybeRemoveSharedPointerListener();
 	});
 
 	function closeListbox(): void {
@@ -151,14 +207,24 @@
 		}
 	}
 
-	function handleWindowPointerDown(event: PointerEvent): void {
-		if (open && root && event.target instanceof Node && !root.contains(event.target)) {
-			closeListbox();
-		}
-	}
-</script>
+	onMount(() => {
+		registration = {
+			close: () => {
+				closeListbox();
+			},
+			isOpen: () => open,
+			root: () => root
+		};
+	});
 
-<svelte:window onpointerdown={handleWindowPointerDown} />
+	onDestroy(() => {
+		if (registration) {
+			openSelects.delete(registration);
+		}
+
+		maybeRemoveSharedPointerListener();
+	});
+</script>
 
 <div bind:this={root} class="select-shell" class:disabled class:open>
 	<button

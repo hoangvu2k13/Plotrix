@@ -145,8 +145,7 @@ function nearestKd(
 		best = { point: node.point, distance };
 	}
 
-	const axisDistance =
-		node.axis === 0 ? target.x - node.point.x : target.y - node.point.y;
+	const axisDistance = node.axis === 0 ? target.x - node.point.x : target.y - node.point.y;
 	const primary = axisDistance < 0 ? node.left : node.right;
 	const secondary = axisDistance < 0 ? node.right : node.left;
 	best = nearestKd(primary, target, best);
@@ -301,11 +300,15 @@ function findCartesianIntersections(
 			continue;
 		}
 
-		const x = bisect((value) => {
-			const leftY = left.evaluate?.(value);
-			const rightY = right.evaluate?.(value);
-			return leftY == null || rightY == null ? null : leftY - rightY;
-		}, x0, x1);
+		const x = bisect(
+			(value) => {
+				const leftY = left.evaluate?.(value);
+				const rightY = right.evaluate?.(value);
+				return leftY == null || rightY == null ? null : leftY - rightY;
+			},
+			x0,
+			x1
+		);
 
 		if (x === null) {
 			continue;
@@ -391,7 +394,12 @@ function findParametricIntersections(
 	right: IntersectionEquation,
 	viewport: IntersectionViewport
 ): IntersectionPoint[] {
-	if (!left.evaluateParametric || !right.evaluateParametric || !left.paramRange || !right.paramRange) {
+	if (
+		!left.evaluateParametric ||
+		!right.evaluateParametric ||
+		!left.paramRange ||
+		!right.paramRange
+	) {
 		return [];
 	}
 

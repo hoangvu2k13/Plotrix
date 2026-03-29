@@ -21,6 +21,8 @@ export interface TracePoint {
 }
 
 export function createUiState() {
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
+	const initialSelectedEquationIds = new Set<string>();
 	const ui = $state({
 		sidebarOpen: true,
 		activeEquationId: null as string | null,
@@ -30,13 +32,13 @@ export function createUiState() {
 		tooltipContent: '',
 		tooltipAnchor: null as TooltipAnchor | null,
 		toasts: [] as Toast[],
-		modalOpen: null as 'settings' | 'export' | 'share' | 'shortcuts' | 'regression' | null,
+		modalOpen: null as 'settings' | 'export' | 'share' | 'shortcuts' | 'regression' | 'auth' | null,
 		commandPaletteOpen: false,
 		announcement: '',
 		tracePoint: null as TracePoint | null,
 		isPanningOrZooming: false,
 		highlightedAsymptotes: [] as number[],
-		selectedEquationIds: new Set<string>(),
+		selectedEquationIds: initialSelectedEquationIds,
 		sidebarActiveTab: 'equations' as 'equations' | 'data'
 	});
 
@@ -82,7 +84,9 @@ export function createUiState() {
 		ui.tooltipAnchor = null;
 	}
 
-	function openModal(name: 'settings' | 'export' | 'share' | 'shortcuts' | 'regression'): void {
+	function openModal(
+		name: 'settings' | 'export' | 'share' | 'shortcuts' | 'regression' | 'auth'
+	): void {
 		ui.modalOpen = name;
 	}
 
@@ -136,10 +140,12 @@ export function createUiState() {
 	}
 
 	function setSelectedEquationIds(ids: Iterable<string>): void {
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		ui.selectedEquationIds = new Set(ids);
 	}
 
 	function toggleSelectedEquationId(id: string): void {
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const next = new Set(ui.selectedEquationIds);
 		if (next.has(id)) next.delete(id);
 		else next.add(id);

@@ -30,7 +30,6 @@
 	}
 
 	$effect(() => {
-		graph.dataSeries.length;
 		ensureActive();
 	});
 
@@ -307,7 +306,7 @@
 						<th class="data-col-header add-col">
 							<button
 								type="button"
-								class="tiny"
+								class="add tiny"
 								onclick={() => addColumn(activeSheet)}
 								aria-label="Add column"
 							>
@@ -363,7 +362,7 @@
 
 		<div class="series-options">
 			<div class="symbols" role="group" aria-label="Scatter symbol">
-				{#each ['circle', 'square', 'triangle', 'cross', 'diamond'] as symbol}
+				{#each ['circle', 'square', 'triangle', 'cross', 'diamond'] as symbol (symbol)}
 					<button
 						type="button"
 						class:selected={activeSheet.style.symbol === symbol}

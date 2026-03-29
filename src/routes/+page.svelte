@@ -2,16 +2,20 @@
 	import { browser } from '$app/environment';
 	import {
 		Aperture,
+		Check,
 		CircleHelp,
 		ChevronDown,
 		CircleDot,
 		CircleGauge,
+		Cloud,
+		CloudOff,
 		Crosshair,
 		Download,
 		FunctionSquare,
 		Grid2x2,
 		Grid3x3,
 		Lock,
+		LoaderCircle,
 		MoreHorizontal,
 		MousePointer2,
 		PanelLeft,
@@ -27,10 +31,12 @@
 		Terminal,
 		Undo2,
 		Upload,
+		UserRound,
 		X
 	} from '@lucide/svelte';
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
 
+	import AuthPanel from '$components/AuthPanel.svelte';
 	import CommandPalette, { type CommandAction } from '$components/CommandPalette.svelte';
 	import DataPanel from '$components/DataPanel.svelte';
 	import EquationCard from '$components/EquationCard.svelte';
@@ -44,6 +50,9 @@
 	import ToastViewport from '$components/ToastViewport.svelte';
 	import Toggle from '$components/Toggle.svelte';
 	import VariableSliderPanel from '$components/VariableSliderPanel.svelte';
+	import { authState } from '$lib/firebase/auth.svelte';
+	import { hasMeaningfulWorkspaceContent } from '$lib/firebase/projects';
+	import { createWorkspaceSyncState } from '$lib/firebase/workspace-sync.svelte';
 	import { parseEquation } from '$lib/math/engine';
 	import { createGraphState } from '$stores/graph.svelte';
 	import { createUiState } from '$stores/ui.svelte';
@@ -53,6 +62,7 @@
 
 	const graph = createGraphState();
 	const ui = createUiState();
+	const sync = createWorkspaceSyncState(graph, ui);
 
 	const themeOptions = [
 		{ value: 'system', label: 'System' },
@@ -94,10 +104,69 @@
 	let settingsSections = $state({ ...DEFAULT_SETTINGS_SECTIONS });
 	let mobileToolbarOpen = $state(false);
 	let sidebarSwipeStart: { x: number; y: number } | null = $state(null);
-	let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+	let mounted = false;
+	let initialHashAction = $state<'new' | 'share' | null>(null);
+	let initialSharedSnapshot = $state<string | null>(null);
+	let hashActionHandled = $state(false);
+	let sessionConfigToken = 0;
+	let lastConfiguredUid: string | null | undefined = undefined;
+	let lastSyncError = '';
+	let syncSuccessFlash = $state(false);
+	let lastSeenSyncedAt: number | null = null;
+	let syncSuccessTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const canUndo = $derived(graph.historyIndex > 0);
 	const canRedo = $derived(graph.historyIndex < graph.historySize - 1);
+	const syncStatusSummary = $derived.by(() => {
+		if (authState.loading && authState.pendingAction === 'bootstrap') {
+			return 'Checking account';
+		}
+
+		if (!authState.available) {
+			return 'Firebase off';
+		}
+
+		switch (sync.status) {
+			case 'loading':
+				return 'Restoring';
+			case 'syncing':
+				return 'Syncing';
+			case 'synced':
+				return 'Synced';
+			case 'error':
+				return 'Sync paused';
+			default:
+				return authState.user ? 'Account ready' : 'Local only';
+		}
+	});
+	const syncStatusDescription = $derived.by(() => {
+		if (!authState.available) {
+			return 'Firebase env is not configured for this build.';
+		}
+
+		switch (sync.status) {
+			case 'loading':
+				return 'Restoring the Firebase workspace.';
+			case 'syncing':
+				return 'Uploading recent workspace changes.';
+			case 'synced':
+				return sync.lastSyncedAt
+					? `Realtime sync active. Last sync ${new Date(sync.lastSyncedAt).toLocaleTimeString()}.`
+					: 'Realtime sync active for this account.';
+			case 'error':
+				return sync.error ?? 'Workspace sync is paused.';
+			default:
+				return authState.user
+					? 'Signed in, waiting for workspace activity.'
+					: 'Guest mode stores this workspace locally on the current device.';
+		}
+	});
+	const accountLabel = $derived.by(
+		() => authState.user?.displayName || authState.user?.email || 'Account sync'
+	);
+	const accountSecondaryLabel = $derived.by(() =>
+		authState.user ? authState.user.email || 'Firebase account session' : 'Guest mode'
+	);
 	const filteredEquations = $derived.by(() => {
 		const needle = equationQuery.trim().toLowerCase();
 		const indexed = graph.equations.map((equation, index) => ({ equation, index }));
@@ -290,6 +359,28 @@
 		mobileToolbarOpen = false;
 	}
 
+	function openAuthModal(): void {
+		ui.openModal('auth');
+		closeMobileToolbar();
+	}
+
+	async function configureWorkspaceSession(
+		user: typeof authState.user,
+		options: {
+			preferCurrentGraph?: boolean;
+			sharedSnapshot?: string | null;
+		} = {}
+	): Promise<void> {
+		const token = ++sessionConfigToken;
+		await sync.configureSession(user, options);
+
+		if (token !== sessionConfigToken) {
+			return;
+		}
+
+		ui.activeEquationId = graph.equations[0]?.id ?? null;
+	}
+
 	function toggleSettingsSection(section: keyof typeof DEFAULT_SETTINGS_SECTIONS): void {
 		settingsSections = {
 			...settingsSections,
@@ -306,7 +397,7 @@
 		}
 
 		try {
-			await graph.importJSON(await file.text());
+			await graph.importJSON(await file.text(), { resetHistory: true });
 			ui.activeEquationId = graph.equations[0]?.id ?? null;
 			ui.announce('Session imported');
 			ui.pushToast({
@@ -403,6 +494,15 @@
 			run: () => ui.openModal('settings')
 		},
 		{
+			id: 'account-sync',
+			category: 'Workspace',
+			title: authState.user ? 'Manage account sync' : 'Sign in for sync',
+			description: authState.user
+				? 'View Firebase auth state and realtime workspace sync.'
+				: 'Enable Firebase auth and bind this workspace to an account.',
+			run: openAuthModal
+		},
+		{
 			id: 'toggle-analysis',
 			category: 'Analysis',
 			title: 'Toggle analysis panel',
@@ -452,6 +552,8 @@
 			return;
 		}
 
+		mounted = true;
+
 		const savedTheme = localStorage.getItem('plotrix-theme');
 
 		if (savedTheme === 'system' || savedTheme === 'light' || savedTheme === 'dark') {
@@ -459,7 +561,6 @@
 		}
 
 		const hash = window.location.hash;
-		let restored = false;
 		const savedSections = localStorage.getItem(SETTINGS_SECTIONS_KEY);
 
 		if (savedSections) {
@@ -476,48 +577,24 @@
 			}
 		}
 
-		void (async () => {
-			try {
-				if (hash.startsWith('#plotrix=')) {
-					await graph.importJSON(hash);
-					restored = true;
-				} else {
-					const stored = localStorage.getItem('plotrix-session');
+		if (hash.startsWith('#plotrix=')) {
+			initialSharedSnapshot = hash;
+		} else if (hash === '#new') {
+			initialHashAction = 'new';
+		} else if (hash === '#share') {
+			initialHashAction = 'share';
+		}
 
-					if (stored) {
-						await graph.importJSON(stored);
-						restored = true;
-					}
-				}
-			} catch {
-				localStorage.removeItem('plotrix-session');
-				ui.pushToast({
-					title: 'Previous session skipped',
-					description: 'Plotrix started fresh because the saved session could not be restored.',
-					tone: 'warning'
-				});
-			}
-
-			if (hash === '#new') {
-				addEquation('');
-			}
-
-			if (hash === '#share') {
-				openShareModal();
-			}
-
-			if (!restored && !graph.equations.length) {
-				graph.seedStarterEquations();
-			}
-
-			ui.activeEquationId = graph.equations[0]?.id ?? null;
-		})();
+		void authState.initialize();
 	});
 
 	onDestroy(() => {
-		if (sessionSaveTimer) {
-			clearTimeout(sessionSaveTimer);
+		if (syncSuccessTimer) {
+			clearTimeout(syncSuccessTimer);
 		}
+
+		sync.destroy();
+		authState.destroy();
 		graph.destroy();
 	});
 
@@ -541,26 +618,113 @@
 	});
 
 	$effect(() => {
-		if (!browser) {
+		if (!browser || !mounted || !authState.initialized) {
+			return;
+		}
+
+		const currentUid = authState.user?.uid ?? null;
+
+		if (currentUid === lastConfiguredUid && initialSharedSnapshot === null) {
+			return;
+		}
+
+		const sharedSnapshot = initialSharedSnapshot;
+		const shouldPreferCurrentGraph =
+			currentUid !== null &&
+			lastConfiguredUid === null &&
+			untrack(() => hasMeaningfulWorkspaceContent(graph.exportSnapshot()));
+
+		lastConfiguredUid = currentUid;
+		initialSharedSnapshot = null;
+
+		void configureWorkspaceSession(authState.user, {
+			preferCurrentGraph: shouldPreferCurrentGraph,
+			sharedSnapshot
+		});
+	});
+
+	$effect(() => {
+		if (!sync.bootstrapped || hashActionHandled) {
+			return;
+		}
+
+		hashActionHandled = true;
+
+		if (initialHashAction === 'new') {
+			addEquation('');
+		}
+
+		if (initialHashAction === 'share') {
+			openShareModal();
+		}
+
+		initialHashAction = null;
+	});
+
+	$effect(() => {
+		if (!browser || !sync.bootstrapped) {
 			return;
 		}
 
 		void graph.historyIndex;
 		void graph.historySize;
+		sync.schedulePersist();
+	});
 
-		if (sessionSaveTimer) {
-			clearTimeout(sessionSaveTimer);
+	$effect(() => {
+		if (sync.lastSyncedAt === null) {
+			lastSeenSyncedAt = null;
+			syncSuccessFlash = false;
+			if (syncSuccessTimer) {
+				clearTimeout(syncSuccessTimer);
+				syncSuccessTimer = null;
+			}
+			return;
 		}
 
-		sessionSaveTimer = setTimeout(() => {
-			const snapshot = graph.exportJSON();
+		if (sync.status !== 'synced') {
+			syncSuccessFlash = false;
+			return;
+		}
 
-			if (snapshot.length <= 512_000) {
-				localStorage.setItem('plotrix-session', snapshot);
-			}
+		if (lastSeenSyncedAt === null) {
+			lastSeenSyncedAt = sync.lastSyncedAt;
+			return;
+		}
 
-			sessionSaveTimer = null;
-		}, 2000);
+		if (sync.lastSyncedAt === lastSeenSyncedAt) {
+			return;
+		}
+
+		lastSeenSyncedAt = sync.lastSyncedAt;
+		syncSuccessFlash = true;
+
+		if (syncSuccessTimer) {
+			clearTimeout(syncSuccessTimer);
+		}
+
+		syncSuccessTimer = setTimeout(() => {
+			syncSuccessFlash = false;
+			syncSuccessTimer = null;
+		}, 1100);
+	});
+
+	$effect(() => {
+		if (!sync.error) {
+			lastSyncError = '';
+			return;
+		}
+
+		if (sync.error === lastSyncError) {
+			return;
+		}
+
+		lastSyncError = sync.error;
+		ui.pushToast({
+			title: 'Workspace sync issue',
+			description: sync.error,
+			tone: 'warning'
+		});
 	});
 </script>
 
@@ -610,6 +774,47 @@
 		</div>
 
 		<div class="toolbar-divider toolbar-divider-push" aria-hidden="true"></div>
+
+		<div class="account-cluster">
+			<button
+				type="button"
+				class="sync-chip"
+				data-state={sync.status}
+				data-flash={syncSuccessFlash}
+				title={syncStatusDescription}
+				onclick={openAuthModal}
+			>
+				{#if authState.loading && authState.pendingAction === 'bootstrap'}
+					<Icon icon={LoaderCircle} size="var(--icon-sm)" class="inline-icon spin-icon" />
+				{:else if sync.status === 'error' || !authState.available}
+					<Icon icon={CloudOff} size="var(--icon-sm)" class="inline-icon" />
+				{:else if syncSuccessFlash}
+					<Icon icon={Check} size="var(--icon-sm)" class="inline-icon sync-success-icon" />
+				{:else}
+					<Icon icon={Cloud} size="var(--icon-sm)" class="inline-icon" />
+				{/if}
+				<span>{syncStatusSummary}</span>
+			</button>
+
+			<button
+				type="button"
+				class="account-chip"
+				aria-label={authState.user ? 'Open account sync' : 'Open sign-in dialog'}
+				onclick={openAuthModal}
+			>
+				<span class="account-avatar" aria-hidden="true">
+					{#if authState.user?.photoURL}
+						<img src={authState.user.photoURL} alt="" referrerpolicy="no-referrer" />
+					{:else}
+						<Icon icon={UserRound} size="var(--icon-md)" class="inline-icon" />
+					{/if}
+				</span>
+				<span class="account-copy">
+					<strong>{accountLabel}</strong>
+					<small>{accountSecondaryLabel}</small>
+				</span>
+			</button>
+		</div>
 
 		<div class="toolbar-cluster">
 			<IconButton
@@ -683,6 +888,14 @@
 			onclick={closeMobileToolbar}
 		></button>
 		<div class="toolbar-popover" role="dialog" aria-label="Toolbar actions">
+			<button type="button" class="toolbar-popover-item" onclick={openAuthModal}>
+				<Icon
+					icon={authState.user ? UserRound : authState.available ? Cloud : CloudOff}
+					size="var(--icon-md)"
+					class="inline-icon"
+				/>
+				<span>{authState.user ? 'Account' : 'Sign in'}</span>
+			</button>
 			<button
 				type="button"
 				class="toolbar-popover-item"
@@ -801,7 +1014,10 @@
 				</div>
 
 				{#if ui.sidebarActiveTab === 'equations'}
-					<div class="sidebar-tab-content equation-list">
+					<div
+						class="sidebar-tab-content equation-list"
+						style={`--equation-count:${graph.equations.length};`}
+					>
 						{#if graph.equations.length >= 5}
 							<label class="equation-search">
 								<Icon icon={Search} size="var(--icon-md)" class="equation-search-icon" />
@@ -1196,6 +1412,15 @@
 			{/if}
 		</section>
 	</div>
+</Modal>
+
+<Modal
+	open={ui.modalOpen === 'auth'}
+	title="Account sync"
+	description="Sign in with Firebase to keep this Plotrix workspace synced in real time across sessions."
+	onClose={() => ui.closeModal()}
+>
+	<AuthPanel auth={authState} {sync} onClose={() => ui.closeModal()} />
 </Modal>
 
 <Modal open={ui.modalOpen === 'regression'} title="Regression" onClose={() => ui.closeModal()}>

@@ -1,0 +1,111 @@
+rules_version = '2';
+service cloud.firestore {
+	match /databases/{database}/documents {
+		function isSignedIn() {
+			return request.auth != null;
+		}
+
+		function isOwner(userId) {
+			return isSignedIn() && request.auth.uid == userId;
+		}
+
+		function validProjectMeta() {
+			return validProjectMetaData(request.resource.data);
+		}
+
+		function validProjectMetaData(data) {
+			return data is map
+				&& data.schemaVersion == 1
+				&& data.ownerUid == request.auth.uid
+				&& data.name is string
+				&& data.name.size() > 0
+				&& data.name.size() <= 80;
+		}
+
+		function validStateDoc() {
+			return validStateDocData(request.resource.data);
+		}
+
+		function validStateDocData(data) {
+			return data is map
+				&& data.version == 2
+				&& data.view is map
+				&& data.settings is map
+				&& data.variables is list
+				&& data.regressionResults is list
+				&& data.annotations is list
+				&& data.variables.size() <= 26
+				&& data.regressionResults.size() <= 24
+				&& data.annotations.size() <= 48;
+		}
+
+		function validEquationDoc() {
+			return validEquationDocData(request.resource.data);
+		}
+
+		function validEquationDocData(data) {
+			return data is map
+				&& data.index is int
+				&& data.raw is string
+				&& data.raw.size() > 0
+				&& data.raw.size() <= 512
+				&& data.kind is string
+				&& data.color is string
+				&& data.label is string
+				&& data.label.size() <= 120
+				&& data.visible is bool
+				&& data.showMarkers is bool
+				&& data.lineWidth is number
+				&& data.opacity is number
+				&& data.paramRange is list
+				&& data.paramRange.size() == 2;
+		}
+
+		function validDataSeriesDoc() {
+			return validDataSeriesDocData(request.resource.data);
+		}
+
+		function validDataSeriesDocData(data) {
+			return data is map
+				&& data.index is int
+				&& data.name is string
+				&& data.name.size() > 0
+				&& data.name.size() <= 32
+				&& data.columns is list
+				&& data.columns.size() <= 8
+				&& data.rows is list
+				&& data.rows.size() <= 1200
+				&& data.style is map
+				&& data.visible is bool
+				&& data.plotted is bool;
+		}
+
+		match /users/{userId} {
+			allow read, write: if false;
+
+			match /projects/{projectId} {
+				allow read: if isOwner(userId);
+				allow create, update: if isOwner(userId) && validProjectMeta();
+				allow delete: if isOwner(userId);
+
+				match /state/{stateId} {
+					allow read: if isOwner(userId);
+					allow create, update: if isOwner(userId) && stateId == "main" && validStateDoc();
+					allow delete: if isOwner(userId);
+				}
+
+				match /equations/{equationId} {
+					allow read: if isOwner(userId);
+					allow create, update: if isOwner(userId) && validEquationDoc();
+					allow delete: if isOwner(userId);
+				}
+
+				match /dataSeries/{seriesId} {
+					allow read: if isOwner(userId);
+					allow create, update: if isOwner(userId) && validDataSeriesDoc();
+					allow delete: if isOwner(userId);
+				}
+			}
+		}
+	}
+}

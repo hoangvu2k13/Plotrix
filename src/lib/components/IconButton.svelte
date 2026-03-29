@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import { nanoid } from 'nanoid';
 
@@ -47,6 +48,12 @@
 		if (timer) clearTimeout(timer);
 		visible = false;
 	}
+
+	onDestroy(() => {
+		if (timer) {
+			clearTimeout(timer);
+		}
+	});
 </script>
 
 <div
