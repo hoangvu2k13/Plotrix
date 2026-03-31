@@ -23,7 +23,7 @@ import { nanoid } from 'nanoid';
 
 import type { GraphSnapshot } from '$stores/graph.svelte';
 
-export const DEFAULT_WORKSPACE_NAME = 'My Plotrix Workspace';
+export const DEFAULT_WORKSPACE_NAME = 'Untitled';
 export const DEFAULT_WORKSPACE_ID = 'default';
 
 export interface WorkspaceMetaDoc {

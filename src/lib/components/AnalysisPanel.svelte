@@ -146,7 +146,7 @@
 			errorMessage = null;
 		} else if (failed) {
 			loading = false;
-			errorMessage = 'Plotrix could not build an analysis report for this equation.';
+			errorMessage = "Couldn't build an analysis report for this equation.";
 		} else {
 			loading = true;
 			errorMessage = null;

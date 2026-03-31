@@ -74,17 +74,17 @@
 	const syncStatusLabel = $derived.by(() => {
 		switch (sync.status) {
 			case 'disabled':
-				return 'Firebase is not configured.';
+				return 'Cloud sync is unavailable.';
 			case 'error':
-				return sync.error ?? 'Workspace sync is paused.';
+				return sync.error ?? 'Sync is paused.';
 			case 'loading':
-				return 'Restoring your synced workspace...';
+				return 'Restoring your workspace...';
 			case 'syncing':
-				return 'Syncing your workspace to Firebase...';
+				return 'Syncing your workspace...';
 			case 'synced':
-				return 'Realtime sync is active for this account.';
+				return 'Syncing in real time.';
 			default:
-				return 'This browser is currently using local-only storage.';
+				return 'Stored on this device only.';
 		}
 	});
 
@@ -150,7 +150,7 @@
 				</div>
 				<div class="auth-account-copy">
 					<strong>{auth.user.displayName || auth.user.email || 'Signed-in account'}</strong>
-					<p>{auth.user.email || 'Firebase account session is active.'}</p>
+					<p>{auth.user.email || 'Signed in.'}</p>
 				</div>
 			</div>
 
@@ -175,9 +175,7 @@
 			</div>
 
 			<div class="auth-actions">
-				<button type="button" class="action-btn action-btn-secondary" onclick={onClose}
-					>Close</button
-				>
+				<button type="button" class="action-btn action-btn-secondary" onclick={onClose}>Done</button>
 				<button
 					type="button"
 					class="action-btn auth-signout"
@@ -197,7 +195,7 @@
 		<div class="auth-shell">
 			<section class="auth-intro">
 				<div>
-					<strong>Account sync</strong>
+					<strong>Account</strong>
 					<p>Sign in to sync this workspace.</p>
 				</div>
 				<div class="auth-mode-switch" role="tablist" aria-label="Authentication mode">
@@ -333,7 +331,7 @@
 				/>
 			</div>
 			<div class="auth-sync-copy">
-				<strong>{auth.available ? 'Firebase ready' : 'Firebase unavailable'}</strong>
+				<strong>{auth.available ? 'Cloud sync ready' : 'Cloud sync unavailable'}</strong>
 				<p>{syncStatusLabel}</p>
 				{#if !auth.available && auth.missingFields.length}
 					<small>Missing: {auth.missingFields.join(', ')}</small>

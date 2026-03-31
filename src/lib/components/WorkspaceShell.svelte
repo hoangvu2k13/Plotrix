@@ -173,7 +173,7 @@
 		}
 
 		if (!authState.available) {
-			return 'Firebase off';
+			return 'Cloud off';
 		}
 
 		if (ui.isOffline && authState.user && sync.pendingWrite) {
@@ -195,7 +195,7 @@
 	});
 	const syncStatusDescription = $derived.by(() => {
 		if (!authState.available) {
-			return 'Firebase env is not configured for this build.';
+			return 'Cloud sync is unavailable in this build.';
 		}
 
 		if (ui.isOffline && authState.user && sync.pendingWrite) {
@@ -204,15 +204,15 @@
 
 		switch (sync.status) {
 			case 'loading':
-				return 'Restoring the Firebase workspace.';
+				return 'Restoring the workspace.';
 			case 'syncing':
 				return 'Uploading recent workspace changes.';
 			case 'synced':
 				return sync.lastSyncedAt
-					? `Realtime sync active. Last sync ${new Date(sync.lastSyncedAt).toLocaleTimeString()}.`
-					: 'Realtime sync active for this account.';
+					? `Syncing in real time. Last sync ${new Date(sync.lastSyncedAt).toLocaleTimeString()}.`
+					: 'Syncing in real time.';
 			case 'error':
-				return sync.error ?? 'Workspace sync is paused.';
+				return sync.error ?? 'Sync is paused.';
 			default:
 				return authState.user
 					? 'Signed in, waiting for workspace activity.'
@@ -220,10 +220,10 @@
 		}
 	});
 	const accountLabel = $derived.by(
-		() => authState.user?.displayName || authState.user?.email || 'Account sync'
+		() => authState.user?.displayName || authState.user?.email || 'Account'
 	);
 	const accountSecondaryLabel = $derived.by(() =>
-		authState.user ? authState.user.email || 'Firebase account session' : 'Guest mode'
+		authState.user ? authState.user.email || 'Signed in' : 'Guest mode'
 	);
 	const sidebarItems = $derived.by<SidebarListItem[]>(() => {
 		const needle = equationQuery.trim().toLowerCase();
@@ -326,7 +326,7 @@
 		ui.setSelectedEquationIds([equation.id]);
 		ui.setSidebarOpen(true);
 		ui.pushToast({
-			title: 'Distribution added',
+			title: 'Added',
 			description: raw.includes('binomialPDF')
 				? 'Inserted a discrete distribution. Probability shading will sum integer outcomes.'
 				: 'Inserted a statistical distribution equation.',
@@ -483,8 +483,8 @@
 
 		if (upper.error || lower.error || !upper.normalized || !lower.normalized) {
 			ui.pushToast({
-				title: 'Shade between unavailable',
-				description: 'Plotrix could not normalize one of the selected equations safely.',
+				title: 'Unavailable',
+				description: "Couldn't normalize one of the selected equations.",
 				tone: 'warning'
 			});
 			return;
@@ -493,7 +493,7 @@
 		graph.addEquation(`y >= (${upper.normalized})`, 'inequality');
 		graph.addEquation(`y <= (${lower.normalized})`, 'inequality');
 		ui.pushToast({
-			title: 'Shaded region added',
+			title: 'Added',
 			description: 'Created an inequality pair between the selected curves.',
 			tone: 'success'
 		});
@@ -540,8 +540,8 @@
 
 		if (!blob) {
 			ui.pushToast({
-				title: 'PNG export unavailable',
-				description: 'The graph canvas has not finished mounting yet.',
+				title: 'Unavailable',
+				description: 'The graph is not ready to export yet.',
 				tone: 'warning'
 			});
 			return;
@@ -549,7 +549,7 @@
 
 		saveBlob(blob, `plotrix-${scale}x.png`);
 		ui.pushToast({
-			title: 'PNG exported',
+			title: 'Exported',
 			description: `Saved a ${scale}x raster export of the current graph.`,
 			tone: 'success'
 		});
@@ -560,8 +560,8 @@
 
 		if (!svg) {
 			ui.pushToast({
-				title: 'SVG export unavailable',
-				description: 'The graph canvas has not finished mounting yet.',
+				title: 'Unavailable',
+				description: 'The graph is not ready to export yet.',
 				tone: 'warning'
 			});
 			return;
@@ -569,7 +569,7 @@
 
 		saveText(svg, 'plotrix-graph.svg', 'image/svg+xml');
 		ui.pushToast({
-			title: 'SVG exported',
+			title: 'Exported',
 			description: 'Saved a vector export of the current graph.',
 			tone: 'success'
 		});
@@ -577,8 +577,8 @@
 
 	async function exportPDFFile(): Promise<void> {
 		const toastId = ui.pushToast({
-			title: 'Generating PDF',
-			description: 'Preparing a PDF export from the current Plotrix canvas.',
+			title: 'Preparing export',
+			description: 'Preparing the PDF export.',
 			tone: 'info',
 			duration: 0
 		});
@@ -587,14 +587,15 @@
 			const blob = await graph.exportPDF();
 			saveBlob(blob, 'plotrix-graph.pdf');
 			ui.pushToast({
-				title: 'PDF exported',
+				title: 'Exported',
 				description: 'Saved a vector PDF of the current graph.',
 				tone: 'success'
 			});
 		} catch (error) {
 			ui.pushToast({
-				title: 'PDF export failed',
-				description: error instanceof Error ? error.message : 'Unable to export the graph as PDF.',
+				title: 'Export failed',
+				description:
+					error instanceof Error ? error.message : "Couldn't export the graph as PDF.",
 				tone: 'warning'
 			});
 		} finally {
@@ -605,8 +606,8 @@
 	function exportJSONFile(): void {
 		saveText(graph.exportJSON(), 'plotrix-session.json');
 		ui.pushToast({
-			title: 'Session exported',
-			description: 'Saved the complete Plotrix graph state as JSON.',
+			title: 'Exported',
+			description: 'Saved the full workspace state as JSON.',
 			tone: 'success'
 		});
 	}
@@ -619,9 +620,9 @@
 			mobileToolbarOpen = false;
 		} catch (error) {
 			ui.pushToast({
-				title: 'Share link unavailable',
+				title: 'Unavailable',
 				description:
-					error instanceof Error ? error.message : 'Plotrix could not build a shareable URL.',
+					error instanceof Error ? error.message : "Couldn't generate a share link.",
 				tone: 'warning'
 			});
 		}
@@ -633,9 +634,9 @@
 				shareUrl = graph.shareURL() ?? '';
 			} catch (error) {
 				ui.pushToast({
-					title: 'Share link unavailable',
+					title: 'Unavailable',
 					description:
-						error instanceof Error ? error.message : 'Plotrix could not build a shareable URL.',
+						error instanceof Error ? error.message : "Couldn't generate a share link.",
 					tone: 'warning'
 				});
 				return;
@@ -648,8 +649,8 @@
 
 		await copyText(shareUrl);
 		ui.pushToast({
-			title: 'Share link copied',
-			description: 'The current graph state is now on your clipboard.',
+			title: 'Link copied',
+			description: 'The current graph state is on your clipboard.',
 			tone: 'success'
 		});
 	}
@@ -714,7 +715,7 @@
 		try {
 			await sync.setPublic(nextValue);
 			ui.pushToast({
-				title: nextValue ? 'Workspace embed enabled' : 'Workspace embed disabled',
+				title: nextValue ? 'Updated' : 'Updated',
 				description: nextValue
 					? 'Anyone with the embed link can view this workspace.'
 					: 'This workspace is private again.',
@@ -722,9 +723,9 @@
 			});
 		} catch (error) {
 			ui.pushToast({
-				title: 'Embed visibility update failed',
+				title: 'Update failed',
 				description:
-					error instanceof Error ? error.message : 'Plotrix could not update workspace visibility.',
+					error instanceof Error ? error.message : "Couldn't update workspace visibility.",
 				tone: 'warning'
 			});
 		}
@@ -733,8 +734,8 @@
 	async function copyEmbedCode(): Promise<void> {
 		await copyText(embedCode);
 		ui.pushToast({
-			title: 'Embed code copied',
-			description: 'The Plotrix iframe snippet is now on your clipboard.',
+			title: 'Copied',
+			description: 'The embed code is on your clipboard.',
 			tone: 'success'
 		});
 	}
@@ -761,20 +762,19 @@
 			const image = graph.addBackgroundImage(dataUrl, width, height);
 
 			if (!image) {
-				throw new Error('Plotrix could not add the selected background image.');
+				throw new Error("Couldn't add the selected background image.");
 			}
 
 			ui.pushToast({
-				title: 'Background image added',
-				description:
-					'Background images stay local to this device and are never synced to Firebase.',
+				title: 'Added',
+				description: 'Stored on this device only. Never synced to the cloud.',
 				tone: 'info'
 			});
 		} catch (error) {
 			ui.pushToast({
-				title: 'Image import failed',
+				title: 'Import failed',
 				description:
-					error instanceof Error ? error.message : 'Unable to import the selected image.',
+					error instanceof Error ? error.message : "Couldn't import the selected image.",
 				tone: 'warning'
 			});
 		} finally {
@@ -791,7 +791,7 @@
 			points: []
 		});
 		ui.pushToast({
-			title: 'Calibration started',
+			title: 'Started',
 			description: 'Click a known point on the image, then enter its math coordinates.',
 			tone: 'info'
 		});
@@ -815,7 +815,7 @@
 
 		if (!Number.isFinite(x) || !Number.isFinite(y)) {
 			ui.pushToast({
-				title: 'Invalid calibration coordinates',
+				title: 'Invalid coordinates',
 				description: 'Use two finite numeric coordinate values.',
 				tone: 'warning'
 			});
@@ -850,7 +850,7 @@
 			});
 			ui.setCalibrationMode(null);
 			ui.pushToast({
-				title: 'Image calibrated',
+				title: 'Calibrated',
 				description: 'The background image is now aligned to the graph coordinates.',
 				tone: 'success'
 			});
@@ -924,14 +924,14 @@
 			ui.setActiveEquationId(graph.equations[0]?.id ?? null);
 			ui.announce('Session imported');
 			ui.pushToast({
-				title: 'Session imported',
-				description: 'Plotrix restored the graph from your JSON file.',
+				title: 'Imported',
+				description: 'Restored the graph from your JSON file.',
 				tone: 'success'
 			});
 		} catch (error) {
 			ui.pushToast({
 				title: 'Import failed',
-				description: error instanceof Error ? error.message : 'Unable to import the selected file.',
+				description: error instanceof Error ? error.message : "Couldn't import the selected file.",
 				tone: 'danger'
 			});
 		} finally {
@@ -1036,8 +1036,8 @@
 			category: 'Workspace',
 			title: authState.user ? 'Manage account sync' : 'Sign in for sync',
 			description: authState.user
-				? 'View Firebase auth state and realtime workspace sync.'
-				: 'Enable Firebase auth and bind this workspace to an account.',
+				? 'View account status and workspace sync.'
+				: 'Sign in to sync this workspace across devices.',
 			run: openAuthModal
 		},
 		{
@@ -1369,7 +1369,7 @@
 			{#if ui.isOffline}
 				<span
 					class="offline-badge"
-					title="Network connection lost. Firebase writes will retry later.">Offline</span
+					title="Connection lost. Changes will sync when you're back online.">Offline</span
 				>
 			{/if}
 
@@ -1636,7 +1636,7 @@
 								<input
 									type="search"
 									bind:value={equationQuery}
-									placeholder="Search equations"
+									placeholder="Search"
 									aria-label="Search equations"
 								/>
 							</label>
@@ -1774,7 +1774,7 @@
 							{/if}
 						{:else}
 							<div class="empty-state">
-								<p>No equations yet.</p>
+								<p>No equations. Add one to get started.</p>
 								<button
 									type="button"
 									class="compact-action compact-action-accent"
@@ -1917,7 +1917,7 @@
 <Modal
 	open={ui.modalOpen === 'settings'}
 	title="Settings"
-	description="Tune the viewport, theme, and rendering defaults."
+	description="Control how graphs look, feel, and render."
 	onClose={() => ui.closeModal()}
 >
 	<div class="settings-list">
@@ -1930,7 +1930,7 @@
 			>
 				<div>
 					<h3>Appearance</h3>
-					<p>Core presentation and interaction overlays.</p>
+					<p>Visual style and interaction behavior.</p>
 				</div>
 				<Icon
 					icon={ChevronDown}
@@ -1964,7 +1964,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-axis-labels-label">Axis labels</strong>
-							<p>Numeric tick labels along axes.</p>
+							<p>Show numeric labels on the x and y axes.</p>
 						</div>
 						<Toggle
 							label="Axis labels"
@@ -1980,7 +1980,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-crosshair-label">Crosshair</strong>
-							<p>Pointer-aligned coordinate overlay.</p>
+							<p>Show live coordinates under your cursor.</p>
 						</div>
 						<Toggle
 							label="Crosshair overlay"
@@ -1996,7 +1996,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-trace-label">Trace mode</strong>
-							<p>Snap to nearest curve while hovering.</p>
+							<p>Lock the cursor to the nearest plotted curve.</p>
 						</div>
 						<Toggle
 							label="Trace mode"
@@ -2018,7 +2018,7 @@
 			>
 				<div>
 					<h3>Grid & Axes</h3>
-					<p>Structure, spacing, and axis scaffolding.</p>
+					<p>Grid lines, intervals, and axis layout.</p>
 				</div>
 				<Icon
 					icon={ChevronDown}
@@ -2034,7 +2034,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-grid-label">Grid</strong>
-							<p>Toggle entire graph grid.</p>
+							<p>Show or hide the background grid.</p>
 						</div>
 						<Toggle
 							label="Grid visibility"
@@ -2053,7 +2053,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong>Grid style</strong>
-							<p>Switch between Cartesian and Polar.</p>
+							<p>Choose between Cartesian and Polar coordinates.</p>
 						</div>
 						<Select
 							value={graph.settings.gridStyle}
@@ -2074,7 +2074,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-minor-grid-label">Minor grid</strong>
-							<p>Render sub-divisions between major intervals.</p>
+							<p>Show finer grid lines between major intervals.</p>
 						</div>
 						<Toggle
 							label="Minor grid"
@@ -2097,7 +2097,7 @@
 			>
 				<div>
 					<h3>Analysis</h3>
-					<p>Markers and analytical overlays.</p>
+					<p>Detected features shown on the graph.</p>
 				</div>
 				<Icon
 					icon={ChevronDown}
@@ -2112,11 +2112,11 @@
 							<Icon icon={CircleDot} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
-							<strong id="setting-critical-label">Critical markers</strong>
-							<p>Show detected roots, extrema, and inflection points.</p>
+							<strong id="setting-critical-label">Critical points</strong>
+							<p>Mark roots, local extrema, and inflection points.</p>
 						</div>
 						<Toggle
-							label="Critical markers"
+							label="Critical points"
 							ariaLabelledby="setting-critical-label"
 							checked={graph.settings.showCriticalPoints}
 							onChange={(checked) => graph.updateSettings({ showCriticalPoints: checked })}
@@ -2129,7 +2129,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-intersections-label">Intersections</strong>
-							<p>Show detected intersections between visible curves.</p>
+							<p>Mark where visible curves cross each other.</p>
 						</div>
 						<Toggle
 							label="Intersection markers"
@@ -2151,7 +2151,7 @@
 			>
 				<div>
 					<h3>Rendering</h3>
-					<p>Performance and raster output behavior.</p>
+					<p>Output quality and performance diagnostics.</p>
 				</div>
 				<Icon
 					icon={ChevronDown}
@@ -2169,7 +2169,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-render-timing-label">Render timings</strong>
-							<p>Per-curve render durations on cards.</p>
+							<p>Show how long each curve takes to render.</p>
 						</div>
 						<Toggle
 							label="Render timings"
@@ -2184,11 +2184,11 @@
 							<Icon icon={ScanEye} size="var(--icon-lg)" class="setting-icon" />
 						</div>
 						<div class="setting-copy">
-							<strong id="setting-hidpi-label">HiDPI rendering</strong>
-							<p>Pixel ratio scaling for sharper output.</p>
+							<strong id="setting-hidpi-label">HiDPI</strong>
+							<p>Use your display's full pixel density.</p>
 						</div>
 						<Toggle
-							label="HiDPI rendering"
+							label="HiDPI"
 							ariaLabelledby="setting-hidpi-label"
 							checked={graph.settings.highDPI}
 							onChange={(checked) => graph.updateSettings({ highDPI: checked })}
@@ -2201,7 +2201,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong id="setting-antialiasing-label">Antialiasing</strong>
-							<p>Smooth curves and axes during rasterization.</p>
+							<p>Smooth the edges of curves and axes.</p>
 						</div>
 						<Toggle
 							label="Antialiasing"
@@ -2223,7 +2223,7 @@
 			>
 				<div>
 					<h3>Canvas</h3>
-					<p>Local-only background images and calibration.</p>
+					<p>Background images are stored locally and never uploaded.</p>
 				</div>
 				<Icon
 					icon={ChevronDown}
@@ -2239,7 +2239,7 @@
 						</div>
 						<div class="setting-copy">
 							<strong>Background images</strong>
-							<p>Images stay local to this device and are never uploaded to Firebase.</p>
+							<p>Stored on this device only. Never synced to the cloud.</p>
 						</div>
 						<button
 							type="button"
@@ -2340,8 +2340,8 @@
 
 <Modal
 	open={ui.modalOpen === 'auth'}
-	title="Account sync"
-	description="Sign in with Firebase to keep this Plotrix workspace synced in real time across sessions."
+	title="Account"
+	description="Your workspaces sync automatically across devices when you're signed in."
 	onClose={() => ui.closeModal()}
 >
 	<AuthPanel auth={authState} {sync} onClose={() => ui.closeModal()} />
@@ -2354,28 +2354,28 @@
 <Modal open={ui.modalOpen === 'export'} title="Export" onClose={() => ui.closeModal()}>
 	<div class="export-grid">
 		<button type="button" class="export-card" onclick={() => exportPNG(1)}>
-			<strong>PNG 1x</strong>
-			<p>Fast raster export for quick sharing.</p>
+			<strong>PNG — Standard</strong>
+			<p>1× resolution. Good for web and sharing.</p>
 		</button>
 		<button type="button" class="export-card" onclick={() => exportPNG(2)}>
-			<strong>PNG 2x</strong>
-			<p>High-density raster export for presentations.</p>
+			<strong>PNG — High-DPI</strong>
+			<p>2× resolution. Sharp on retina displays and slides.</p>
 		</button>
 		<button type="button" class="export-card" onclick={() => exportPNG(3)}>
-			<strong>PNG 3x</strong>
-			<p>Maximum raster sharpness for detailed layouts.</p>
+			<strong>PNG — Print</strong>
+			<p>3× resolution. Best for print and detailed layouts.</p>
 		</button>
 		<button type="button" class="export-card" onclick={exportSVGFile}>
 			<strong>SVG</strong>
-			<p>Vector output for design tools and scalable docs.</p>
+			<p>Infinitely scalable. Import into Figma, Illustrator, or any design tool.</p>
 		</button>
 		<button type="button" class="export-card" onclick={() => void exportPDFFile()}>
 			<strong>PDF</strong>
-			<p>Vector PDF for academic submission and print workflows.</p>
+			<p>Publication-ready. Ideal for papers, reports, and print.</p>
 		</button>
 		<button type="button" class="export-card" onclick={exportJSONFile}>
 			<strong>JSON</strong>
-			<p>Complete Plotrix session for import or versioning.</p>
+			<p>Full workspace snapshot. Use for backups or sharing the editable file.</p>
 		</button>
 	</div>
 </Modal>
@@ -2390,11 +2390,10 @@
 				class="share-readonly"
 				aria-label="Share URL (read-only)"
 				readonly
-				title="Read-only share URL"
 				value={shareUrl}
 			/>
 		</div>
-		<p class="share-note">Read-only link generated from the current Plotrix session.</p>
+		<p class="share-note">Read-only link generated from the current workspace.</p>
 		<div class="share-actions">
 			<button type="button" class="action-btn action-btn-primary" onclick={copyShareLink}>
 				Copy link

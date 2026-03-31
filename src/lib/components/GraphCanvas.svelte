@@ -311,7 +311,7 @@
 		bind:this={canvas}
 		class="canvas"
 		tabindex="0"
-		aria-label="Interactive Plotrix graph canvas"
+		aria-label="Interactive graph canvas"
 		oncontextmenu={interactive ? handleCanvasContextMenu : undefined}
 		onpointerdown={interactive ? handleCanvasPointerDown : undefined}
 		onpointermove={interactive ? handleCanvasPointerMove : undefined}

@@ -56,14 +56,14 @@ function normalizeAuthUser(user: User | null): AuthUser | null {
 
 function normalizeAuthError(error: unknown): string {
 	if (!(error instanceof Error)) {
-		return 'Authentication failed. Please try again.';
+		return 'Authentication failed. Try again.';
 	}
 
 	const code = (error as Error & { code?: string }).code ?? '';
 
 	switch (code) {
 		case 'auth/configuration-not-found':
-			return 'Firebase Authentication is not fully configured for this project.';
+			return 'Cloud sign-in is unavailable.';
 		case 'auth/email-already-in-use':
 			return 'That email address already has an account.';
 		case 'auth/invalid-credential':
@@ -76,13 +76,13 @@ function normalizeAuthError(error: unknown): string {
 		case 'auth/popup-closed-by-user':
 			return 'The Google sign-in popup was closed before completion.';
 		case 'auth/network-request-failed':
-			return 'Network access failed while talking to Firebase.';
+			return "Couldn't reach the server. Check your connection and try again.";
 		case 'auth/too-many-requests':
-			return 'Firebase temporarily blocked this request after too many attempts.';
+			return 'Too many attempts. Try again later.';
 		case 'auth/weak-password':
 			return 'Choose a stronger password before creating the account.';
 		default:
-			return error.message || 'Authentication failed. Please try again.';
+			return error.message || 'Authentication failed. Try again.';
 	}
 }
 
@@ -195,7 +195,7 @@ export function createAuthState() {
 			const instance = await ensureAuth();
 
 			if (!instance) {
-				throw new Error('Firebase Authentication is not configured.');
+				throw new Error('Cloud sign-in is unavailable.');
 			}
 
 			await signInWithEmailAndPassword(instance, email.trim(), password);
@@ -218,7 +218,7 @@ export function createAuthState() {
 			const instance = await ensureAuth();
 
 			if (!instance) {
-				throw new Error('Firebase Authentication is not configured.');
+				throw new Error('Cloud sign-in is unavailable.');
 			}
 
 			const credential = await createUserWithEmailAndPassword(instance, email.trim(), password);
@@ -247,7 +247,7 @@ export function createAuthState() {
 			const instance = await ensureAuth();
 
 			if (!instance) {
-				throw new Error('Firebase Authentication is not configured.');
+				throw new Error('Cloud sign-in is unavailable.');
 			}
 
 			const provider = new GoogleAuthProvider();

@@ -26,13 +26,13 @@ type WorkspaceSource = 'cloud' | 'local';
 function normalizeSyncError(error: unknown): string {
 	if (error instanceof Error) {
 		if (/missing or insufficient permissions/i.test(error.message)) {
-			return 'Sync paused because Firestore rejected this workspace request.';
+			return 'Sync paused because the cloud rejected this workspace request.';
 		}
 
-		return error.message || 'Workspace sync failed.';
+		return error.message || 'Sync failed. Try again.';
 	}
 
-	return 'Workspace sync failed.';
+	return 'Sync failed. Try again.';
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -235,8 +235,8 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 			}
 
 			ui.pushToast({
-				title: 'Shared workspace skipped',
-				description: 'The Plotrix share payload was invalid or exceeded the safe import limit.',
+				title: 'Skipped',
+				description: 'The shared workspace file was invalid or too large to import.',
 				tone: 'warning'
 			});
 		}
@@ -250,8 +250,8 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		if (stored) {
 			localStorage.removeItem(LOCAL_SESSION_KEY);
 			ui.pushToast({
-				title: 'Local workspace skipped',
-				description: 'The saved local workspace was invalid and was cleared safely.',
+				title: 'Skipped',
+				description: 'The saved local workspace was invalid and was cleared.',
 				tone: 'warning'
 			});
 		}
@@ -337,7 +337,7 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		if (!nextDb) {
 			state.pendingWrite = false;
 			state.status = 'error';
-			state.error = 'Firebase Firestore is unavailable in this environment.';
+			state.error = 'Cloud sync is unavailable in this environment.';
 			return;
 		}
 
@@ -486,7 +486,7 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 			state.bootstrapped = true;
 			state.pendingWrite = false;
 			state.status = 'error';
-			state.error = 'Firebase Firestore is unavailable in this environment.';
+			state.error = 'Cloud sync is unavailable in this environment.';
 			return;
 		}
 
@@ -526,9 +526,8 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 						}
 
 						ui.pushToast({
-							title: 'Shared workspace skipped',
-							description:
-								'The Plotrix share payload could not be restored into the signed-in workspace.',
+							title: 'Skipped',
+							description: "Couldn't restore the shared workspace into this signed-in workspace.",
 							tone: 'warning'
 						});
 					}

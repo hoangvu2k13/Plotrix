@@ -289,7 +289,7 @@ function base64UrlDecode(value: string): string {
 	const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
 
 	if (Math.floor((padded.length * 3) / 4) > MAX_URL_SNAPSHOT_BYTES) {
-		throw new Error('Shared Plotrix URL is too large to decode safely.');
+		throw new Error('Shared URL is too large to decode safely.');
 	}
 
 	const binary = atob(padded);
@@ -297,7 +297,7 @@ function base64UrlDecode(value: string): string {
 	const decoded = new TextDecoder().decode(bytes);
 
 	if (decoded.length > MAX_URL_SNAPSHOT_BYTES) {
-		throw new Error('Shared Plotrix URL is too large to decode safely.');
+		throw new Error('Shared URL is too large to decode safely.');
 	}
 
 	return decoded;
@@ -899,7 +899,7 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 	try {
 		parsed = JSON.parse(payload) as GraphSnapshot | { version: 1; [key: string]: unknown };
 	} catch {
-		throw new Error('Invalid Plotrix snapshot JSON.');
+		throw new Error('Invalid workspace JSON.');
 	}
 
 	if (
@@ -976,7 +976,7 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 		};
 	}
 
-	throw new Error('Unsupported Plotrix snapshot.');
+	throw new Error('Unsupported workspace snapshot.');
 }
 
 export function createGraphState() {
@@ -1498,7 +1498,7 @@ export function createGraphState() {
 
 		if (!serialized) {
 			if (!entry.compressed) {
-				throw new Error('Plotrix history entry is unavailable.');
+				throw new Error('This history entry is unavailable.');
 			}
 
 			serialized = await decompressHistoryText(entry.compressed);
@@ -2706,7 +2706,7 @@ export function createGraphState() {
 		const document = parser.parseFromString(svg, 'image/svg+xml');
 
 		if (document.querySelector('parsererror')) {
-			throw new Error('Plotrix could not parse the SVG export safely.');
+			throw new Error("Couldn't parse the SVG export.");
 		}
 
 		const colorCanvas = window.document.createElement('canvas');
@@ -2968,19 +2968,19 @@ export function createGraphState() {
 
 	async function importJSON(json: string, options: ImportGraphOptions = {}): Promise<void> {
 		if (json.length > MAX_URL_SNAPSHOT_BYTES * 8) {
-			throw new Error('Imported Plotrix snapshot exceeds the supported size limit.');
+			throw new Error('Imported workspace file is too large.');
 		}
 
 		let snapshot: GraphSnapshot;
 		try {
 			snapshot = deserializeSnapshot(json);
 		} catch (error) {
-			throw new Error(error instanceof Error ? error.message : 'Unable to import Plotrix state.', {
+			throw new Error(error instanceof Error ? error.message : "Couldn't import this workspace.", {
 				cause: error
 			});
 		}
 		if (!snapshot.equations.length && !snapshot.dataSeries.length) {
-			throw new Error('Imported Plotrix state is empty or invalid.');
+			throw new Error('This workspace file is empty or invalid.');
 		}
 		await restoreSnapshot(snapshot);
 
@@ -3003,7 +3003,7 @@ export function createGraphState() {
 		const url = `${window.location.origin}${window.location.pathname}#plotrix=${encoded}`;
 
 		if (encoded.length > MAX_URL_SNAPSHOT_BYTES * 2 || url.length > MAX_URL_SNAPSHOT_BYTES * 2) {
-			throw new Error('Plotrix snapshot is too large to share as a URL. Export JSON instead.');
+			throw new Error('This workspace is too large to share as a link. Export JSON instead.');
 		}
 
 		window.history.replaceState(null, '', `#plotrix=${encoded}`);

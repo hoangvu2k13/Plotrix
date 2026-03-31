@@ -40,7 +40,7 @@
 		isPublic: false,
 		lastSyncedAt: null as number | null,
 		pendingWrite: false,
-		projectName: 'Plotrix Workspace',
+		projectName: 'Workspace',
 		remoteExists: false,
 		source: 'local' as const,
 		status: 'local' as const,
@@ -103,7 +103,7 @@
 			workspaces = await listUserWorkspaces(db, user.uid);
 		} catch (error) {
 			errorMessage =
-				error instanceof Error ? error.message : 'Unable to load the Plotrix workspace list.';
+				error instanceof Error ? error.message : "Couldn't load your workspaces. Try again.";
 		} finally {
 			loading = false;
 		}
@@ -146,7 +146,7 @@
 			await goto(resolve('/workspace/[id]', { id }));
 		} catch (error) {
 			errorMessage =
-				error instanceof Error ? error.message : 'Plotrix could not create a new workspace.';
+				error instanceof Error ? error.message : "Couldn't create a workspace. Try again.";
 			creatingWorkspace = false;
 		}
 	}
@@ -167,7 +167,7 @@
 			await goto(resolve('/workspace/[id]', { id }));
 		} catch (error) {
 			errorMessage =
-				error instanceof Error ? error.message : 'Plotrix could not duplicate this workspace.';
+				error instanceof Error ? error.message : "Couldn't duplicate this workspace. Try again.";
 			busyWorkspaceId = null;
 		}
 	}
@@ -180,7 +180,7 @@
 			return;
 		}
 
-		if (!window.confirm(`Delete "${entry.name}"? This removes the synced workspace data.`)) {
+		if (!window.confirm(`Delete "${entry.name}"? This cannot be undone.`)) {
 			return;
 		}
 
@@ -192,7 +192,7 @@
 			await refreshWorkspaces();
 		} catch (error) {
 			errorMessage =
-				error instanceof Error ? error.message : 'Plotrix could not delete this workspace.';
+				error instanceof Error ? error.message : "Couldn't delete this workspace. Try again.";
 		} finally {
 			busyWorkspaceId = null;
 		}
@@ -248,7 +248,7 @@
 			await refreshWorkspaces();
 		} catch (error) {
 			errorMessage =
-				error instanceof Error ? error.message : 'Plotrix could not rename this workspace.';
+				error instanceof Error ? error.message : "Couldn't rename this workspace. Try again.";
 			element.textContent = entry.name;
 		} finally {
 			busyWorkspaceId = null;
@@ -304,13 +304,11 @@
 					<img src="/brand/icon.svg" alt="" width="18" height="18" />
 				</div>
 				<div>
-					<p class="dashboard-eyebrow">Plotrix</p>
-					<strong>Workspace hub</strong>
+					<strong>Workspaces</strong>
 				</div>
 			</div>
 
 			<section class="dashboard-sidebar-section">
-				<p class="dashboard-sidebar-label">Quick actions</p>
 				<button
 					type="button"
 					class="dashboard-sidebar-action dashboard-sidebar-action-primary"
@@ -326,16 +324,21 @@
 					onclick={() => goto(resolve('/workspace/[id]', { id: 'default' }))}
 				>
 					<Icon icon={FolderOpen} size="var(--icon-md)" class="inline-icon" />
-					<span>Open guest workspace</span>
+					<span>Continue as guest</span>
 				</button>
 				<button type="button" class="dashboard-sidebar-action" onclick={cycleTheme}>
 					<Icon icon={SunMoon} size="var(--icon-md)" class="inline-icon" />
-					<span>Theme: {currentTheme}</span>
+					<span
+						>Theme: {currentTheme === 'system'
+							? 'System'
+							: currentTheme === 'light'
+								? 'Light'
+								: 'Dark'}</span
+					>
 				</button>
 			</section>
 
 			<section class="dashboard-sidebar-section">
-				<p class="dashboard-sidebar-label">Overview</p>
 				<div class="dashboard-stat-list">
 					<div class="dashboard-stat-card">
 						<span>Workspaces</span>
@@ -349,12 +352,11 @@
 			</section>
 
 			<section class="dashboard-sidebar-section dashboard-sidebar-note">
-				<p class="dashboard-sidebar-label">Status</p>
 				{#if authState.user}
 					<strong>{authState.user.displayName || authState.user.email}</strong>
 					<p>
 						{#if lastUpdatedWorkspace}
-							Last updated: {lastUpdatedWorkspace.name}
+							Last opened: {lastUpdatedWorkspace.name}
 						{:else}
 							Your account is ready for synced workspaces.
 						{/if}
@@ -369,11 +371,10 @@
 		<main class="dashboard-main">
 			<header class="dashboard-header dashboard-header-shell">
 				<div>
-					<p class="dashboard-eyebrow">Workspace center</p>
-					<h1>Build, organize, and reopen your graphs faster.</h1>
+					<h1>Every graph you've ever built, one click away.</h1>
 					<p class="dashboard-copy">
-						Everything important stays one click away: recent workspaces, quick creation, guest
-						access, and account sync.
+						Create, rename, duplicate, or pick up where you left off. Workspaces sync
+						automatically when you're signed in.
 					</p>
 				</div>
 				<div class="dashboard-header-tools">
@@ -383,7 +384,7 @@
 						onclick={() => goto(resolve('/workspace/[id]', { id: 'default' }))}
 					>
 						<Icon icon={FolderOpen} size="var(--icon-md)" class="inline-icon" />
-						<span>Open guest workspace</span>
+						<span>Continue as guest</span>
 					</button>
 				</div>
 			</header>
@@ -391,7 +392,7 @@
 			{#if !authState.initialized || (authState.loading && authState.pendingAction === 'bootstrap')}
 				<div class="dashboard-empty">
 					<Icon icon={LoaderCircle} size="var(--icon-lg)" class="inline-icon spin-icon" />
-					<p>Loading your Plotrix account…</p>
+					<p>Loading account…</p>
 				</div>
 			{:else if !authState.user}
 				<section class="dashboard-guest">
@@ -438,7 +439,7 @@
 						</div>
 						<div class="workspace-card-copy">
 							<strong>{creatingWorkspace ? 'Creating…' : 'New workspace'}</strong>
-							<p>Start a fresh synced Plotrix project.</p>
+							<p>Blank canvas. Synced the moment you name it.</p>
 						</div>
 					</button>
 
@@ -447,7 +448,7 @@
 							<div class="workspace-thumb workspace-thumb-placeholder"></div>
 							<div class="workspace-card-copy">
 								<strong>Loading workspaces…</strong>
-								<p>Fetching your synced Plotrix projects.</p>
+								<p>Loading your workspaces.</p>
 							</div>
 						</div>
 					{:else}
@@ -468,7 +469,7 @@
 										/>
 									{:else}
 										<div class="workspace-thumb workspace-thumb-fallback">
-											<span>{workspace.equationCount} eq</span>
+											<span>{workspace.equationCount} equations</span>
 										</div>
 									{/if}
 								</button>
@@ -492,7 +493,7 @@
 										{workspace.name}
 									</h2>
 									<p>
-										Created {dateFormatter.format(workspace.createdAt)} · {`${workspace.equationCount} equation${workspace.equationCount === 1 ? '' : 's'}`}
+										{dateFormatter.format(workspace.createdAt)} · {`${workspace.equationCount} equation${workspace.equationCount === 1 ? '' : 's'}`}
 									</p>
 								</div>
 

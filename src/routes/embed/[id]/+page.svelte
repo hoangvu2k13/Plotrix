@@ -39,7 +39,7 @@
 		const app = getFirebaseApp();
 
 		if (!app) {
-			errorMessage = 'Firebase is unavailable for this embed.';
+			errorMessage = 'Cloud sync is unavailable for this embed.';
 			loading = false;
 			return;
 		}
@@ -49,7 +49,7 @@
 				const record = await loadPublicWorkspaceRecord(getFirestore(app), data.workspaceId);
 
 				if (!record.snapshot || !record.isPublic) {
-					errorMessage = 'This Plotrix embed is unavailable.';
+					errorMessage = 'This embed is unavailable.';
 					return;
 				}
 
@@ -60,7 +60,7 @@
 				ui.setSidebarOpen(false);
 			} catch (error) {
 				errorMessage =
-					error instanceof Error ? error.message : 'This Plotrix embed could not be loaded.';
+					error instanceof Error ? error.message : "Couldn't load this embed. Try again.";
 			} finally {
 				loading = false;
 			}

@@ -549,7 +549,7 @@ export class InteractionManager {
 			if (this.graph.historyIndex >= this.graph.historySize - 1) {
 				this.ui.pushToast({
 					title: 'Nothing to redo',
-					description: 'Plotrix is already at the newest history state.',
+					description: 'Already at the latest history state.',
 					tone: 'info',
 					duration: 1500
 				});
@@ -564,7 +564,7 @@ export class InteractionManager {
 			if (this.graph.historyIndex <= 0) {
 				this.ui.pushToast({
 					title: 'Nothing to undo',
-					description: 'Plotrix is already at the oldest history state.',
+					description: 'Already at the earliest history state.',
 					tone: 'info',
 					duration: 1500
 				});

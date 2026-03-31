@@ -536,7 +536,7 @@ export class CanvasRenderer {
 		const ctx = canvas.getContext('2d');
 
 		if (!ctx) {
-			throw new Error('Plotrix could not create a 2D canvas context.');
+			throw new Error("Couldn't create a 2D canvas context.");
 		}
 
 		this.ctx = ctx;
