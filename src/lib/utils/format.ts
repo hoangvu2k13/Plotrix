@@ -1,5 +1,11 @@
+export const DISPLAY_PRECISION = 4;
+
 export function clamp(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, value));
+}
+
+function trimDecimalZeros(value: string): string {
+	return value.replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1');
 }
 
 export function formatNumber(value: number, fractionDigits = 2): string {
@@ -22,7 +28,7 @@ export function formatNumber(value: number, fractionDigits = 2): string {
 }
 
 export function formatCoordinate(value: number): string {
-	return formatNumber(value, 3);
+	return formatDisplay(value);
 }
 
 export function formatDuration(ms: number): string {
@@ -30,7 +36,33 @@ export function formatDuration(ms: number): string {
 }
 
 export function formatSig(value: number, digits = 3): string {
-	return Number.isFinite(value) ? value.toPrecision(digits) : 'NaN';
+	if (!Number.isFinite(value)) {
+		return value > 0 ? '∞' : value < 0 ? '-∞' : 'NaN';
+	}
+
+	if (value === 0) {
+		return '0';
+	}
+
+	const abs = Math.abs(value);
+
+	if (abs >= 1_000_000 && abs < 1e15) {
+		const exponent = Math.floor(Math.log10(abs));
+		const fractionDigits = Math.max(0, digits - exponent - 1);
+		return trimDecimalZeros(
+			value.toLocaleString('en-US', {
+				maximumFractionDigits: fractionDigits,
+				useGrouping: true
+			})
+		);
+	}
+
+	const formatted = value.toPrecision(digits);
+	return formatted.includes('e') ? formatted : trimDecimalZeros(formatted);
+}
+
+export function formatDisplay(value: number): string {
+	return formatSig(value, DISPLAY_PRECISION);
 }
 
 export function formatShortcut(shortcut: string): string {

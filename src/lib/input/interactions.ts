@@ -2,10 +2,12 @@ import { evaluateCartesianAt, evaluateParametric } from '$lib/math/engine';
 import type { CanvasRenderer } from '$lib/renderer/canvas';
 import type { GraphState } from '$stores/graph.svelte';
 import type { UiState } from '$stores/ui.svelte';
-import { clamp } from '$utils/format';
+import { clamp, formatDisplay } from '$utils/format';
 
 export class InteractionManager {
 	private pointers = new Map<number, { x: number; y: number }>();
+	private draggingConstrainedPointId: string | null = null;
+	private draggingIntegralBound: { shadingId: string; bound: 'xMin' | 'xMax' } | null = null;
 	private lastPanPoint: { x: number; y: number } | null = null;
 	private lastPanTimestamp = 0;
 	private lastPinchDistance = 0;
@@ -69,6 +71,11 @@ export class InteractionManager {
 	}
 
 	private handleWheel = (event: WheelEvent): void => {
+		if (this.ui.calibrationMode) {
+			event.preventDefault();
+			return;
+		}
+
 		event.preventDefault();
 		this.stopFling();
 		this.ui.pingInteraction();
@@ -98,6 +105,11 @@ export class InteractionManager {
 	};
 
 	private handleDoubleClick = (event: MouseEvent): void => {
+		if (this.ui.calibrationMode) {
+			event.preventDefault();
+			return;
+		}
+
 		this.ui.pingInteraction();
 
 		if (
@@ -116,6 +128,15 @@ export class InteractionManager {
 			return;
 		}
 
+		if (this.ui.calibrationMode) {
+			event.preventDefault();
+			const point = this.getCanvasPoint(event);
+			this.renderer.setPointerPosition(point);
+			this.canvas.style.cursor = 'crosshair';
+			this.handleCalibrationSelection(point);
+			return;
+		}
+
 		this.stopFling();
 		this.canvas.focus();
 		this.canvas.setPointerCapture(event.pointerId);
@@ -124,15 +145,23 @@ export class InteractionManager {
 		this.lastPanPoint = point;
 		this.lastPanTimestamp = performance.now();
 		this.velocity = { x: 0, y: 0 };
-		this.graph.view.isPanning = this.pointers.size === 1;
+		this.draggingConstrainedPointId = this.findConstrainedPointHandle(point);
+		this.draggingIntegralBound = this.findIntegralBoundaryHandle(point);
+		this.graph.view.isPanning =
+			this.pointers.size === 1 && !this.draggingIntegralBound && !this.draggingConstrainedPointId;
 		this.renderer.setPointerPosition(point);
 		this.ui.pingInteraction();
+		this.canvas.style.cursor = this.draggingConstrainedPointId
+			? 'ew-resize'
+			: this.draggingIntegralBound
+				? 'col-resize'
+				: 'grab';
 		if (
 			event.pointerType === 'touch' &&
 			typeof window !== 'undefined' &&
 			window.innerWidth < 960 &&
 			!this.ui.sidebarOpen &&
-			point.x <= 28
+			point.x <= 52
 		) {
 			this.sidebarSwipeStart = point;
 		} else {
@@ -156,6 +185,50 @@ export class InteractionManager {
 		}
 
 		this.renderer.setPointerPosition(point);
+
+		if (this.ui.calibrationMode) {
+			this.canvas.style.cursor = 'crosshair';
+			this.ui.setTracePoint(null);
+			return;
+		}
+
+		if (this.ui.presentationMode) {
+			this.ui.markPresentationActivity();
+		}
+
+		if (this.draggingConstrainedPointId && this.pointers.size === 1 && event.buttons !== 0) {
+			const [mathX] = this.renderer.canvasToMath(point.x, point.y);
+			const current = this.graph.constrainedPoints.find(
+				(entry) => entry.id === this.draggingConstrainedPointId
+			);
+			const equation = this.graph.equations.find((entry) => entry.id === current?.equationId);
+
+			if (current && equation) {
+				const range = this.renderer.visibleMathRange();
+				this.graph.updateConstrainedPoint(current.id, {
+					x: clamp(mathX, range.xMin, range.xMax)
+				});
+				this.ui.setActiveConstrainedPointId(current.id);
+			}
+
+			this.canvas.style.cursor = 'ew-resize';
+			this.graph.view.isPanning = false;
+			this.ui.setTracePoint(null);
+			this.ui.pingInteraction(180);
+			return;
+		}
+
+		if (this.draggingIntegralBound && this.pointers.size === 1 && event.buttons !== 0) {
+			const [mathX] = this.renderer.canvasToMath(point.x, point.y);
+			this.graph.updateIntegralShading(this.draggingIntegralBound.shadingId, {
+				[this.draggingIntegralBound.bound]: mathX
+			});
+			this.canvas.style.cursor = 'col-resize';
+			this.graph.view.isPanning = false;
+			this.ui.setTracePoint(null);
+			this.ui.pingInteraction(240);
+			return;
+		}
 
 		if (this.pointers.size >= 2) {
 			const [first, second] = [...this.pointers.values()];
@@ -219,7 +292,16 @@ export class InteractionManager {
 			return;
 		}
 
-		this.updateTrace(point.x, point.y);
+		this.canvas.style.cursor = this.findConstrainedPointHandle(point)
+			? 'ew-resize'
+			: this.findIntegralBoundaryHandle(point)
+				? 'col-resize'
+				: 'grab';
+		if (this.graph.settings.traceMode) {
+			this.updateTrace(point.x, point.y);
+		} else {
+			this.ui.setTracePoint(null);
+		}
 	};
 
 	private handlePointerUp = (event: PointerEvent): void => {
@@ -231,6 +313,13 @@ export class InteractionManager {
 			this.lastPanPoint = null;
 			this.lastPinchDistance = 0;
 			this.sidebarSwipeStart = null;
+			if (this.draggingConstrainedPointId) {
+				this.graph.commitHistoryNow('constrained-point', this.draggingConstrainedPointId);
+				this.ui.setActiveConstrainedPointId(this.draggingConstrainedPointId);
+			}
+			this.draggingConstrainedPointId = null;
+			this.draggingIntegralBound = null;
+			this.canvas.style.cursor = 'grab';
 			this.maybeStartFling();
 			return;
 		}
@@ -243,8 +332,95 @@ export class InteractionManager {
 		if (this.pointers.size === 0) {
 			this.renderer.setPointerPosition(null);
 			this.ui.setTracePoint(null);
+			this.canvas.style.cursor = this.ui.calibrationMode ? 'crosshair' : 'grab';
 		}
 	};
+
+	private handleCalibrationSelection(point: { x: number; y: number }): void {
+		const mode = this.ui.calibrationMode;
+
+		if (!mode) {
+			return;
+		}
+
+		const imagePoint = this.renderer.pickBackgroundImagePoint(mode.imageId, point.x, point.y);
+
+		if (!imagePoint) {
+			this.ui.pushToast({
+				title: 'Select a point on the image',
+				description: 'Calibration clicks must land on the imported background image.',
+				tone: 'warning'
+			});
+			return;
+		}
+
+		this.ui.openCalibrationPrompt({
+			imageId: mode.imageId,
+			imagePoint,
+			step: mode.step
+		});
+	}
+
+	private findIntegralBoundaryHandle(point: { x: number; y: number }) {
+		for (const shading of this.graph.integralShadings) {
+			if (!shading.visible) {
+				continue;
+			}
+
+			const equation = this.graph.equations.find((entry) => entry.id === shading.equationId);
+
+			if (
+				!equation ||
+				!equation.visible ||
+				equation.errorMessage ||
+				equation.kind !== 'cartesian'
+			) {
+				continue;
+			}
+
+			const [minCanvasX] = this.renderer.mathToCanvas(shading.xMin, 0);
+			if (Math.abs(minCanvasX - point.x) <= 8) {
+				return { shadingId: shading.id, bound: 'xMin' as const };
+			}
+
+			const [maxCanvasX] = this.renderer.mathToCanvas(shading.xMax, 0);
+			if (Math.abs(maxCanvasX - point.x) <= 8) {
+				return { shadingId: shading.id, bound: 'xMax' as const };
+			}
+		}
+
+		return null;
+	}
+
+	private findConstrainedPointHandle(point: { x: number; y: number }) {
+		const scope = this.graph.variableScope();
+
+		for (const entry of this.graph.constrainedPoints) {
+			if (!entry.visible) {
+				continue;
+			}
+
+			const equation = this.graph.equations.find((item) => item.id === entry.equationId);
+
+			if (!equation || equation.kind !== 'cartesian' || !equation.compiledExpression) {
+				continue;
+			}
+
+			const y = evaluateCartesianAt(equation.compiledExpression, entry.x, scope);
+
+			if (y === null) {
+				continue;
+			}
+
+			const [cx, cy] = this.renderer.mathToCanvas(entry.x, y);
+
+			if (Math.hypot(cx - point.x, cy - point.y) <= 12) {
+				return entry.id;
+			}
+		}
+
+		return null;
+	}
 
 	private maybeStartFling(): void {
 		const speed = Math.hypot(this.velocity.x, this.velocity.y);
@@ -315,7 +491,7 @@ export class InteractionManager {
 							x: point.x,
 							y: point.y,
 							equationId: equation.id,
-							detail: `· t=${t.toPrecision(4)}`
+							detail: `· t=${formatDisplay(t)}`
 						};
 					}
 				}
@@ -488,6 +664,11 @@ export class InteractionManager {
 				this.graph.resetView();
 				break;
 			case 'Escape':
+				if (this.ui.presentationMode) {
+					event.preventDefault();
+					void this.ui.exitPresentationMode();
+					return;
+				}
 				if (this.ui.commandPaletteOpen || this.ui.modalOpen || this.ui.activeAnalysisEquationId) {
 					return;
 				}

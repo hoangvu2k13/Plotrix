@@ -1,4 +1,5 @@
 import type { EquationKind, ParametricNodes } from '$lib/math/engine';
+import { formatDisplay } from '$utils/format';
 import { bisect } from '$utils/math';
 
 export interface IntersectionPoint {
@@ -43,7 +44,7 @@ function formatIntersectionValue(value: number, span: number): string {
 	}
 
 	if (Math.abs(value) < 10_000) {
-		return value.toPrecision(4);
+		return formatDisplay(value);
 	}
 
 	const decimals = Math.max(0, Math.min(4, 3 - Math.floor(Math.log10(Math.max(span, 1)))));

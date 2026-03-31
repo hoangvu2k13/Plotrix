@@ -28,7 +28,7 @@
 		const step = (now: number) => {
 			const elapsed = Math.min(now - previous, 33) / 1000;
 			previous = now;
-			const delta = variable.step * 60 * elapsed;
+			const delta = variable.step * elapsed;
 			let next = variable.value + delta;
 
 			if (next > variable.max) {

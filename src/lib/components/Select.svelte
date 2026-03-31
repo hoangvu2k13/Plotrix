@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { ChevronDown } from '@lucide/svelte';
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy } from 'svelte';
 
 	import Icon from '$components/Icon.svelte';
+	import { createOutsideClickRegistry } from '$utils/outsideClick';
 
 	type SelectRegistration = {
 		close: () => void;
@@ -10,38 +11,7 @@
 		root: () => HTMLDivElement | null;
 	};
 
-	// eslint-disable-next-line svelte/prefer-svelte-reactivity
-	const openSelects = new Set<SelectRegistration>();
-	let pointerListenerAttached = false;
-
-	function handleSharedPointerDown(event: PointerEvent): void {
-		for (const registration of openSelects) {
-			const target = event.target;
-			const root = registration.root();
-
-			if (registration.isOpen() && root && target instanceof Node && !root.contains(target)) {
-				registration.close();
-			}
-		}
-	}
-
-	function ensureSharedPointerListener(): void {
-		if (pointerListenerAttached || typeof document === 'undefined') {
-			return;
-		}
-
-		document.addEventListener('pointerdown', handleSharedPointerDown);
-		pointerListenerAttached = true;
-	}
-
-	function maybeRemoveSharedPointerListener(): void {
-		if (!pointerListenerAttached || openSelects.size > 0 || typeof document === 'undefined') {
-			return;
-		}
-
-		document.removeEventListener('pointerdown', handleSharedPointerDown);
-		pointerListenerAttached = false;
-	}
+	const outsideClickRegistry = createOutsideClickRegistry();
 
 	export interface SelectOption {
 		value: string;
@@ -65,7 +35,13 @@
 	let open = $state(false);
 	let root: HTMLDivElement | null = null;
 	let activeIndex = $state(-1);
-	let registration: SelectRegistration | null = null;
+	const registration: SelectRegistration = {
+		close: () => {
+			closeListbox();
+		},
+		isOpen: () => open,
+		root: () => root
+	};
 
 	const selectedIndex = $derived(
 		Math.max(
@@ -87,13 +63,11 @@
 		}
 
 		if (open) {
-			openSelects.add(registration);
-			ensureSharedPointerListener();
+			outsideClickRegistry.add(registration);
 			return;
 		}
 
-		openSelects.delete(registration);
-		maybeRemoveSharedPointerListener();
+		outsideClickRegistry.delete(registration);
 	});
 
 	function closeListbox(): void {
@@ -207,22 +181,8 @@
 		}
 	}
 
-	onMount(() => {
-		registration = {
-			close: () => {
-				closeListbox();
-			},
-			isOpen: () => open,
-			root: () => root
-		};
-	});
-
 	onDestroy(() => {
-		if (registration) {
-			openSelects.delete(registration);
-		}
-
-		maybeRemoveSharedPointerListener();
+		outsideClickRegistry.delete(registration);
 	});
 </script>
 

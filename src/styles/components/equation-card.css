@@ -1,0 +1,276 @@
+@layer components {
+	.equation-card {
+		display: grid;
+		gap: var(--space-2);
+		padding: var(--space-2);
+		border: 1px solid var(--color-border);
+		border-radius: calc(var(--radius-lg) + 2px);
+		background: var(--color-bg-surface);
+		box-shadow: var(--shadow-sm);
+		transition:
+			border-color var(--duration-fast) var(--ease-default),
+			box-shadow var(--duration-fast) var(--ease-default);
+	}
+
+	.equation-card:hover {
+		border-color: color-mix(in oklch, var(--color-accent) 22%, var(--color-border));
+		box-shadow: var(--shadow-md);
+	}
+
+	.equation-card.active,
+	.equation-card.selected {
+		border-color: color-mix(in oklch, var(--color-accent) 50%, var(--color-border));
+		box-shadow:
+			var(--shadow-md),
+			0 0 0 1px color-mix(in oklch, var(--color-accent) 18%, transparent);
+	}
+
+	.equation-card .summary-row {
+		position: relative;
+		display: grid;
+		grid-template-columns: 22px 30px 30px minmax(0, 1fr) 30px 30px 30px 30px;
+		align-items: center;
+		gap: var(--space-2);
+		min-height: 46px;
+		padding: var(--space-1) var(--space-1) 0;
+	}
+
+	.equation-card .summary-color {
+		position: relative;
+		align-self: stretch;
+		min-height: 46px;
+		border-radius: var(--radius-md);
+		overflow: hidden;
+		background: var(--swatch);
+		cursor: pointer;
+		transition: opacity var(--duration-fast) var(--ease-default);
+	}
+
+	.equation-card .summary-color:hover {
+		opacity: 0.85;
+	}
+
+	.equation-card .summary-color .picker,
+	.equation-card .summary-color .swatch {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		border: 0;
+		border-radius: 0;
+	}
+
+	.equation-card .summary-color .swatch span {
+		border-radius: 0;
+	}
+
+	.equation-card .drag-handle,
+	.equation-card .summary-action {
+		display: inline-grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		border-radius: var(--radius-md);
+		background: transparent;
+		color: var(--color-text-muted);
+		cursor: pointer;
+		transition:
+			background-color var(--duration-fast) var(--ease-default),
+			color var(--duration-fast) var(--ease-default),
+			transform var(--duration-fast) var(--ease-default);
+	}
+
+	.equation-card .drag-handle {
+		color: color-mix(in oklch, var(--color-text-muted) 60%, transparent);
+		cursor: grab;
+	}
+
+	.equation-card .drag-handle:active {
+		cursor: grabbing;
+	}
+
+	.equation-card .summary-action:hover:not(:disabled),
+	.equation-card .drag-handle:hover {
+		background: var(--color-bg-overlay);
+		color: var(--color-text-secondary);
+		transform: translateY(-1px);
+	}
+
+	.equation-card .summary-action:active:not(:disabled) {
+		transform: translateY(0);
+	}
+
+	.equation-card .summary-action:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+
+	.equation-card .summary-delete {
+		color: var(--color-text-muted);
+	}
+
+	.equation-card .summary-delete:hover {
+		color: var(--color-danger) !important;
+		background: color-mix(in oklch, var(--color-danger) 10%, transparent) !important;
+	}
+
+	.equation-card .preview-button {
+		position: relative;
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+		height: 38px;
+		padding: 0 var(--space-2);
+		border-radius: var(--radius-md);
+		text-align: left;
+		cursor: pointer;
+		transition: background-color var(--duration-fast) var(--ease-default);
+	}
+
+	.equation-card .preview-button:hover {
+		background: color-mix(in oklch, var(--color-bg-overlay) 70%, transparent);
+	}
+
+	.equation-card .preview {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--color-text-primary);
+		font-size: var(--text-sm);
+		line-height: 1.2;
+	}
+
+	.equation-card .warning-badge {
+		display: inline-grid;
+		place-items: center;
+		flex-shrink: 0;
+		color: var(--color-warning);
+	}
+
+	.equation-card .editor-row {
+		padding: 0;
+	}
+
+	.equation-card .editor-row .editor-shell {
+		border-radius: calc(var(--radius-md) + 2px);
+	}
+
+	.equation-card .editor-row .editor-body,
+	.equation-card .editor-row .editor-host {
+		min-height: 54px;
+		max-height: 54px;
+	}
+
+	.equation-card .settings-drawer {
+		display: grid;
+		gap: var(--space-2);
+		max-height: min(200px, max(120px, calc(100dvh - 240px - (var(--equation-count, 3) * 88px))));
+		padding: 0 0 var(--space-1);
+		overflow: auto;
+		scrollbar-gutter: stable;
+		border-top: 1px solid color-mix(in oklch, var(--color-border) 60%, transparent);
+	}
+
+	.equation-card .meta {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: var(--space-2);
+		padding-top: var(--space-2);
+		padding-inline: var(--space-1);
+		color: var(--color-text-muted);
+		font-size: var(--text-xs);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+
+	.equation-card .settings-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-2);
+		padding-inline: var(--space-1);
+	}
+
+	.equation-card .control {
+		display: grid;
+		gap: var(--space-1-5);
+		padding: var(--space-2);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-base);
+		transition: border-color var(--duration-fast) var(--ease-default);
+	}
+
+	.equation-card .control:focus-within {
+		border-color: color-mix(in oklch, var(--color-accent) 40%, var(--color-border));
+	}
+
+	.equation-card .control > span {
+		color: var(--color-text-muted);
+		font-size: var(--text-xs);
+		font-weight: var(--font-weight-semibold);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+
+	.equation-card .control input {
+		height: 30px;
+		padding: 0 var(--space-2);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		background: var(--color-bg-surface);
+		color: var(--color-text-primary);
+		font-size: var(--text-sm);
+		transition:
+			border-color var(--duration-fast) var(--ease-default),
+			box-shadow var(--duration-fast) var(--ease-default);
+	}
+
+	.equation-card .control input:focus {
+		outline: none;
+		border-color: color-mix(in oklch, var(--color-accent) 55%, var(--color-border));
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--color-accent) 14%, transparent);
+	}
+
+	.condition-input-wrap {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+	}
+
+	.condition-input-wrap input {
+		min-width: 0;
+		width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.equation-card .toggle-control {
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+	}
+
+	.equation-card .toggle-control > span {
+		align-self: center;
+	}
+
+	.equation-card .error {
+		padding: var(--space-1-5) var(--space-2);
+		border: 1px solid color-mix(in oklch, var(--color-danger) 30%, var(--color-border));
+		border-radius: var(--radius-sm);
+		background: color-mix(in oklch, var(--color-danger) 8%, transparent);
+		color: var(--color-danger);
+		font-size: var(--text-xs);
+		line-height: var(--line-height-normal);
+	}
+
+	.equation-card .summary-icon,
+	.equation-card .warning-icon {
+		display: block;
+	}
+}

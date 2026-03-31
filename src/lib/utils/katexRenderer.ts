@@ -10,6 +10,7 @@ type PendingRequest = {
 
 const pending = new Map<string, PendingRequest[]>();
 let worker: Worker | null = null;
+let renderGeneration = 0;
 
 function ensureWorker(): Worker | null {
 	if (!browser || typeof Worker === 'undefined') {
@@ -82,6 +83,8 @@ export function renderKatex(
 		return Promise.resolve(fallback);
 	}
 
+	const myGeneration = ++renderGeneration;
+
 	const existing = pending.get(cacheKey);
 
 	if (existing) {
@@ -105,5 +108,7 @@ export function renderKatex(
 		displayMode
 	});
 
-	return promise.catch(() => fallback);
+	return promise
+		.then((html) => (renderGeneration > myGeneration + 50 ? fallback : html))
+		.catch(() => fallback);
 }

@@ -5,7 +5,6 @@
 		LoaderCircle,
 		LogOut,
 		Mail,
-		ShieldCheck,
 		UserRound,
 		UserRoundPlus
 	} from '@lucide/svelte';
@@ -146,7 +145,7 @@
 					{#if auth.user.photoURL}
 						<img src={auth.user.photoURL} alt="" referrerpolicy="no-referrer" />
 					{:else}
-						<Icon icon={UserRound} size="var(--icon-lg)" class="auth-avatar-icon" />
+						<Icon icon={UserRound} size="var(--icon-lg)" class="auth-inline-icon" />
 					{/if}
 				</div>
 				<div class="auth-account-copy">
@@ -158,7 +157,7 @@
 			<div class="auth-sync-status" data-tone={sync.status === 'error' ? 'warning' : 'success'}>
 				<div class="auth-sync-icon" aria-hidden="true">
 					<Icon
-						icon={sync.status === 'error' ? CloudOff : ShieldCheck}
+						icon={sync.status === 'error' ? CloudOff : Cloud}
 						size="var(--icon-md)"
 						class="auth-inline-icon"
 					/>
@@ -167,7 +166,7 @@
 					<strong>{sync.projectName}</strong>
 					<p>{syncStatusLabel}</p>
 					{#if sync.lastSyncedAt}
-						<small>Last client sync {new Date(sync.lastSyncedAt).toLocaleTimeString()}</small>
+						<small>{new Date(sync.lastSyncedAt).toLocaleTimeString()}</small>
 					{/if}
 				</div>
 				<div class="auth-sync-pill" data-state={sync.status}>
@@ -175,156 +174,155 @@
 				</div>
 			</div>
 
-			<p class="auth-footnote">
-				Plotrix is syncing equations, data tables, graph settings, annotations, and regression
-				history in real time for this account.
-			</p>
-
-			<button
-				type="button"
-				class="action-btn action-btn-secondary auth-signout"
-				disabled={isBusy}
-				onclick={signOutCurrentUser}
-			>
-				<Icon icon={LogOut} size="var(--icon-md)" class="auth-inline-icon" />
-				<span>{auth.pendingAction === 'sign-out' ? 'Signing out...' : 'Sign out'}</span>
-			</button>
+			<div class="auth-actions">
+				<button type="button" class="action-btn action-btn-secondary" onclick={onClose}
+					>Close</button
+				>
+				<button
+					type="button"
+					class="action-btn auth-signout"
+					disabled={isBusy}
+					onclick={signOutCurrentUser}
+				>
+					<Icon icon={LogOut} size="var(--icon-sm)" class="auth-inline-icon" />
+					<span>{auth.pendingAction === 'sign-out' ? 'Signing out...' : 'Sign out'}</span>
+				</button>
+			</div>
 
 			{#if auth.error}
 				<p class="auth-error" role="alert">{auth.error}</p>
 			{/if}
 		</section>
 	{:else}
-		<section class="auth-intro">
-			<div>
-				<strong>Account sync</strong>
-				<p>
-					Sign in to bind this workspace to Firebase and keep it in sync across browser sessions in
-					real time.
-				</p>
-			</div>
-			<div class="auth-mode-switch" role="tablist" aria-label="Authentication mode">
-				<button
-					type="button"
-					role="tab"
-					class:active={mode === 'sign-in'}
-					aria-selected={mode === 'sign-in'}
-					onclick={() => switchMode('sign-in')}
-				>
-					<Icon icon={Mail} size="var(--icon-sm)" class="auth-inline-icon" />
-					<span>Sign in</span>
-				</button>
-				<button
-					type="button"
-					role="tab"
-					class:active={mode === 'sign-up'}
-					aria-selected={mode === 'sign-up'}
-					onclick={() => switchMode('sign-up')}
-				>
-					<Icon icon={UserRoundPlus} size="var(--icon-sm)" class="auth-inline-icon" />
-					<span>Create account</span>
-				</button>
-			</div>
-		</section>
+		<div class="auth-shell">
+			<section class="auth-intro">
+				<div>
+					<strong>Account sync</strong>
+					<p>Sign in to sync this workspace.</p>
+				</div>
+				<div class="auth-mode-switch" role="tablist" aria-label="Authentication mode">
+					<button
+						type="button"
+						role="tab"
+						class:active={mode === 'sign-in'}
+						aria-selected={mode === 'sign-in'}
+						onclick={() => switchMode('sign-in')}
+					>
+						<Icon icon={Mail} size="var(--icon-sm)" class="auth-inline-icon" />
+						<span>Sign in</span>
+					</button>
+					<button
+						type="button"
+						role="tab"
+						class:active={mode === 'sign-up'}
+						aria-selected={mode === 'sign-up'}
+						onclick={() => switchMode('sign-up')}
+					>
+						<Icon icon={UserRoundPlus} size="var(--icon-sm)" class="auth-inline-icon" />
+						<span>Create account</span>
+					</button>
+				</div>
+			</section>
 
-		<form
-			class="auth-form"
-			onsubmit={async (event) => {
-				event.preventDefault();
-				await submit();
-			}}
-		>
-			{#if mode === 'sign-up'}
+			<form
+				class="auth-form"
+				onsubmit={async (event) => {
+					event.preventDefault();
+					await submit();
+				}}
+			>
+				{#if mode === 'sign-up'}
+					<label class="auth-field">
+						<span>Name</span>
+						<input
+							type="text"
+							bind:value={displayName}
+							placeholder="Your name"
+							autocomplete="name"
+							disabled={isBusy || !auth.available}
+						/>
+					</label>
+				{/if}
+
 				<label class="auth-field">
-					<span>Name</span>
+					<span>Email</span>
 					<input
-						type="text"
-						bind:value={displayName}
-						placeholder="How Plotrix should label your account"
-						autocomplete="name"
+						type="email"
+						bind:value={email}
+						placeholder="name@example.com"
+						autocomplete={mode === 'sign-in' ? 'email' : 'username'}
+						inputmode="email"
 						disabled={isBusy || !auth.available}
 					/>
-				</label>
-			{/if}
-
-			<label class="auth-field">
-				<span>Email</span>
-				<input
-					type="email"
-					bind:value={email}
-					placeholder="name@example.com"
-					autocomplete={mode === 'sign-in' ? 'email' : 'username'}
-					inputmode="email"
-					disabled={isBusy || !auth.available}
-				/>
-				{#if emailError}
-					<small class="auth-error">{emailError}</small>
-				{/if}
-			</label>
-
-			<label class="auth-field">
-				<span>Password</span>
-				<input
-					type="password"
-					bind:value={password}
-					placeholder={mode === 'sign-in' ? 'Enter your password' : 'Use at least 8 characters'}
-					autocomplete={mode === 'sign-in' ? 'current-password' : 'new-password'}
-					disabled={isBusy || !auth.available}
-				/>
-				{#if passwordError}
-					<small class="auth-error">{passwordError}</small>
-				{/if}
-			</label>
-
-			{#if mode === 'sign-up'}
-				<label class="auth-field">
-					<span>Confirm password</span>
-					<input
-						type="password"
-						bind:value={confirmPassword}
-						placeholder="Repeat the password"
-						autocomplete="new-password"
-						disabled={isBusy || !auth.available}
-					/>
-					{#if confirmPasswordError}
-						<small class="auth-error">{confirmPasswordError}</small>
+					{#if emailError}
+						<small class="auth-error">{emailError}</small>
 					{/if}
 				</label>
-			{/if}
 
-			{#if auth.error}
-				<p class="auth-error" role="alert">{auth.error}</p>
-			{/if}
+				<label class="auth-field">
+					<span>Password</span>
+					<input
+						type="password"
+						bind:value={password}
+						placeholder={mode === 'sign-in' ? 'Enter your password' : 'Use at least 8 characters'}
+						autocomplete={mode === 'sign-in' ? 'current-password' : 'new-password'}
+						disabled={isBusy || !auth.available}
+					/>
+					{#if passwordError}
+						<small class="auth-error">{passwordError}</small>
+					{/if}
+				</label>
+
+				{#if mode === 'sign-up'}
+					<label class="auth-field">
+						<span>Confirm password</span>
+						<input
+							type="password"
+							bind:value={confirmPassword}
+							placeholder="Repeat the password"
+							autocomplete="new-password"
+							disabled={isBusy || !auth.available}
+						/>
+						{#if confirmPasswordError}
+							<small class="auth-error">{confirmPasswordError}</small>
+						{/if}
+					</label>
+				{/if}
+
+				{#if auth.error}
+					<p class="auth-error" role="alert">{auth.error}</p>
+				{/if}
+
+				<button
+					type="submit"
+					class="action-btn action-btn-primary auth-submit"
+					disabled={Boolean(emailError || passwordError || confirmPasswordError) ||
+						isBusy ||
+						!auth.available}
+				>
+					{#if isBusy && (auth.pendingAction === 'email-sign-in' || auth.pendingAction === 'email-sign-up')}
+						<Icon icon={LoaderCircle} size="var(--icon-md)" class="auth-inline-icon spin-icon" />
+					{/if}
+					<span>{primaryActionLabel}</span>
+				</button>
+			</form>
+
+			<div class="auth-divider"><span>or</span></div>
 
 			<button
-				type="submit"
-				class="action-btn action-btn-primary auth-submit"
-				disabled={Boolean(emailError || passwordError || confirmPasswordError) ||
-					isBusy ||
-					!auth.available}
+				type="button"
+				class="action-btn action-btn-secondary auth-google"
+				disabled={isBusy || !auth.available}
+				onclick={continueWithGoogle}
 			>
-				{#if isBusy && (auth.pendingAction === 'email-sign-in' || auth.pendingAction === 'email-sign-up')}
+				{#if auth.pendingAction === 'google-sign-in'}
 					<Icon icon={LoaderCircle} size="var(--icon-md)" class="auth-inline-icon spin-icon" />
+				{:else}
+					<Icon icon={Cloud} size="var(--icon-md)" class="auth-inline-icon" />
 				{/if}
-				<span>{primaryActionLabel}</span>
+				<span>{googleActionLabel}</span>
 			</button>
-		</form>
-
-		<div class="auth-divider"><span>or</span></div>
-
-		<button
-			type="button"
-			class="action-btn action-btn-secondary auth-google"
-			disabled={isBusy || !auth.available}
-			onclick={continueWithGoogle}
-		>
-			{#if auth.pendingAction === 'google-sign-in'}
-				<Icon icon={LoaderCircle} size="var(--icon-md)" class="auth-inline-icon spin-icon" />
-			{:else}
-				<Icon icon={Cloud} size="var(--icon-md)" class="auth-inline-icon" />
-			{/if}
-			<span>{googleActionLabel}</span>
-		</button>
+		</div>
 
 		<div class="auth-sync-status" data-tone={auth.available ? 'success' : 'warning'}>
 			<div class="auth-sync-icon" aria-hidden="true">
@@ -342,10 +340,5 @@
 				{/if}
 			</div>
 		</div>
-
-		<p class="auth-footnote">
-			Guest mode keeps your workspace only on this device. Signing in turns on account-bound,
-			realtime sync through Firebase.
-		</p>
 	{/if}
 </div>

@@ -35,18 +35,29 @@
 	let host: HTMLDivElement | null = null;
 	let body: HTMLDivElement | null = null;
 	let view: EditorView | null = null;
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
+	const COMPLETION_CACHE = new Map<
+		EquationKind,
+		Array<{ label: string; type: 'variable' | 'text' | 'function' }>
+	>();
 
 	function completionEntries(kind: EquationKind) {
+		const cached = COMPLETION_CACHE.get(kind);
+
+		if (cached) {
+			return cached;
+		}
+
 		const variables =
 			kind === 'parametric'
 				? ['t']
 				: kind === 'polar'
 					? ['t', 'theta']
-					: kind === 'implicit'
+					: kind === 'implicit' || kind === 'slopefield' || kind === 'vectorfield'
 						? ['x', 'y']
 						: ['x'];
 
-		return [
+		const entries: Array<{ label: string; type: 'variable' | 'text' | 'function' }> = [
 			'sin',
 			'cos',
 			'tan',
@@ -67,13 +78,28 @@
 			'min',
 			'max',
 			'pow',
+			'normalPDF',
+			'normalCDF',
+			'binomialPDF',
+			'poissonPDF',
+			'tPDF',
+			'chiSquaredPDF',
 			'pi',
 			'e',
+			'{x<0:-x,x>=0:x}',
 			...variables
 		].map((label) => ({
 			label,
-			type: label.length === 1 || label === 'theta' ? 'variable' : 'function'
+			type:
+				label.length === 1 || label === 'theta'
+					? 'variable'
+					: label.startsWith('{')
+						? 'text'
+						: 'function'
 		}));
+
+		COMPLETION_CACHE.set(kind, entries);
+		return entries;
 	}
 
 	const mathLinter = linter((view) => {

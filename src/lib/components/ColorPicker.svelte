@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy } from 'svelte';
 
 	import { EXTENDED_COLOR_PALETTE } from '$lib/constants/palette';
+	import { createOutsideClickRegistry } from '$utils/outsideClick';
 
 	type PickerRegistration = {
 		root: () => HTMLDivElement | null;
@@ -9,38 +10,7 @@
 		isOpen: () => boolean;
 	};
 
-	// eslint-disable-next-line svelte/prefer-svelte-reactivity
-	const openPickers = new Set<PickerRegistration>();
-	let pointerListenerAttached = false;
-
-	function handleSharedPointerDown(event: PointerEvent): void {
-		for (const picker of openPickers) {
-			const root = picker.root();
-			const target = event.target;
-
-			if (picker.isOpen() && root && target instanceof Node && !root.contains(target)) {
-				picker.close();
-			}
-		}
-	}
-
-	function ensureSharedPointerListener(): void {
-		if (pointerListenerAttached || typeof document === 'undefined') {
-			return;
-		}
-
-		document.addEventListener('pointerdown', handleSharedPointerDown);
-		pointerListenerAttached = true;
-	}
-
-	function maybeRemoveSharedPointerListener(): void {
-		if (!pointerListenerAttached || openPickers.size > 0 || typeof document === 'undefined') {
-			return;
-		}
-
-		document.removeEventListener('pointerdown', handleSharedPointerDown);
-		pointerListenerAttached = false;
-	}
+	const outsideClickRegistry = createOutsideClickRegistry();
 
 	const PRESET_COLORS = [...EXTENDED_COLOR_PALETTE];
 	const COLOR_NAMES: Record<string, string> = {
@@ -70,7 +40,13 @@
 	let hexValue = $state('#6366f1');
 	let invalidHex = $state(false);
 	let root: HTMLDivElement | null = null;
-	let registration: PickerRegistration | null = null;
+	const registration: PickerRegistration = {
+		root: () => root,
+		close: () => {
+			open = false;
+		},
+		isOpen: () => open
+	};
 
 	function normalizeHex(next: string): string {
 		const trimmed = next.trim();
@@ -93,30 +69,15 @@
 		}
 
 		if (open) {
-			openPickers.add(registration);
-			ensureSharedPointerListener();
+			outsideClickRegistry.add(registration);
 			return;
 		}
 
-		openPickers.delete(registration);
-		maybeRemoveSharedPointerListener();
-	});
-
-	onMount(() => {
-		registration = {
-			root: () => root,
-			close: () => {
-				open = false;
-			},
-			isOpen: () => open
-		};
+		outsideClickRegistry.delete(registration);
 	});
 
 	onDestroy(() => {
-		if (registration) {
-			openPickers.delete(registration);
-		}
-		maybeRemoveSharedPointerListener();
+		outsideClickRegistry.delete(registration);
 	});
 </script>
 

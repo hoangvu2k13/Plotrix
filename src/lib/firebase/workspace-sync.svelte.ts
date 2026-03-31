@@ -7,6 +7,7 @@ import {
 	createWorkspacePayload,
 	DEFAULT_WORKSPACE_NAME,
 	hasMeaningfulWorkspaceContent,
+	setWorkspacePublic,
 	subscribeToWorkspace,
 	writeWorkspacePayload,
 	type WorkspaceRecord
@@ -15,17 +16,41 @@ import type { GraphState } from '$stores/graph.svelte';
 import type { UiState } from '$stores/ui.svelte';
 
 const LOCAL_SESSION_KEY = 'plotrix-session-local';
+const LOCAL_SESSION_TOUCHED_KEY = 'plotrix-session-local-touched';
 const LOCAL_SESSION_LIMIT = 512_000;
+const THUMBNAIL_DATA_URL_LIMIT = 64 * 1024;
 
 type SyncStatus = 'disabled' | 'error' | 'idle' | 'loading' | 'local' | 'synced' | 'syncing';
 type WorkspaceSource = 'cloud' | 'local';
 
 function normalizeSyncError(error: unknown): string {
 	if (error instanceof Error) {
+		if (/missing or insufficient permissions/i.test(error.message)) {
+			return 'Sync paused because Firestore rejected this workspace request.';
+		}
+
 		return error.message || 'Workspace sync failed.';
 	}
 
 	return 'Workspace sync failed.';
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+
+		reader.onload = () => {
+			if (typeof reader.result === 'string') {
+				resolve(reader.result);
+				return;
+			}
+
+			reject(new Error('Unable to read the workspace thumbnail.'));
+		};
+		reader.onerror = () =>
+			reject(reader.error ?? new Error('Unable to read the workspace thumbnail.'));
+		reader.readAsDataURL(blob);
+	});
 }
 
 export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
@@ -34,13 +59,15 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		bootstrapped: false,
 		configured: firebaseSetup.configured,
 		error: null as string | null,
+		isPublic: false,
 		lastSyncedAt: null as number | null,
 		pendingWrite: false,
 		projectName: DEFAULT_WORKSPACE_NAME,
 		remoteExists: false,
 		source: 'local' as WorkspaceSource,
 		status: (firebaseSetup.configured ? 'idle' : 'disabled') as SyncStatus,
-		userUid: null as string | null
+		userUid: null as string | null,
+		workspaceId: 'default'
 	});
 
 	let db: Firestore | null = null;
@@ -52,7 +79,23 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 	let initialRemoteHandled = false;
 	let ignoreInitialRemote = false;
 	let currentUserUid: string | null = null;
+	let currentWorkspaceId = 'default';
 	let pendingSharedSnapshot: string | null = null;
+	let queuedRemoteRecord: WorkspaceRecord | null = null;
+	let lastThumbnailEquationHash = '';
+	let lastThumbnailDataUrl: string | null = null;
+	const handleOnline = () => {
+		if (state.pendingWrite && currentUserUid) {
+			void flushRemoteWrite();
+			return;
+		}
+
+		void maybeApplyQueuedRemoteRecord();
+	};
+
+	if (browser) {
+		window.addEventListener('online', handleOnline);
+	}
 
 	function persistGuestBackup(): void {
 		if (!browser) {
@@ -64,10 +107,36 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 
 			if (snapshot.length <= LOCAL_SESSION_LIMIT) {
 				localStorage.setItem(LOCAL_SESSION_KEY, snapshot);
+				localStorage.setItem(LOCAL_SESSION_TOUCHED_KEY, '1');
 			}
 		} catch {
 			// Ignore backup failures and continue into auth/session setup.
 		}
+	}
+
+	function hasLocalWorkspaceBeenTouched(): boolean {
+		if (!browser) {
+			return false;
+		}
+
+		return localStorage.getItem(LOCAL_SESSION_TOUCHED_KEY) === '1';
+	}
+
+	function markLocalWorkspaceTouched(): void {
+		if (!browser) {
+			return;
+		}
+
+		localStorage.setItem(LOCAL_SESSION_TOUCHED_KEY, '1');
+	}
+
+	function buildThumbnailEquationHash(snapshot: ReturnType<typeof graph.exportSnapshot>): string {
+		return snapshot.equations
+			.map(
+				(equation) =>
+					`${equation.id}:${equation.raw}:${equation.kind}:${equation.color}:${equation.lineWidth}:${equation.lineStyle}:${equation.opacity}:${equation.visible}:${equation.label}:${equation.showMarkers}:${equation.paramRange[0]}:${equation.paramRange[1]}:${equation.condition ?? ''}`
+			)
+			.join('|');
 	}
 
 	function clearPendingTimer(): void {
@@ -81,6 +150,30 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		unsubscribeWorkspace?.();
 		unsubscribeWorkspace = null;
 		initialRemoteHandled = false;
+		queuedRemoteRecord = null;
+	}
+
+	function hasFocusedEditableElement(): boolean {
+		if (!browser) {
+			return false;
+		}
+
+		const active = document.activeElement as HTMLElement | null;
+
+		if (!active) {
+			return false;
+		}
+
+		return (
+			active instanceof HTMLInputElement ||
+			active instanceof HTMLTextAreaElement ||
+			active.isContentEditable ||
+			Boolean(active.closest('[contenteditable="true"]'))
+		);
+	}
+
+	function shouldDeferSyncActivity(): boolean {
+		return ui.isPanningOrZooming || hasFocusedEditableElement();
 	}
 
 	function getDb(): Firestore | null {
@@ -107,6 +200,9 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 			handlingRemote = source === 'cloud';
 			suppressPersistOnce();
 			await graph.importJSON(json, { commitHistory: false, resetHistory: true });
+			if (source === 'local') {
+				markLocalWorkspaceTouched();
+			}
 			state.bootstrapped = true;
 			state.source = source;
 			state.status = source === 'cloud' ? 'synced' : 'local';
@@ -130,6 +226,7 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		state.remoteExists = false;
 		state.userUid = null;
 		state.projectName = DEFAULT_WORKSPACE_NAME;
+		state.isPublic = false;
 		state.lastSyncedAt = null;
 
 		if (sharedSnapshot) {
@@ -160,8 +257,17 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		}
 
 		if (!graph.equations.length) {
+			if (hasLocalWorkspaceBeenTouched()) {
+				state.bootstrapped = true;
+				state.source = 'local';
+				state.status = 'local';
+				state.error = null;
+				return;
+			}
+
 			graph.seedStarterEquations();
 			suppressPersistOnce();
+			markLocalWorkspaceTouched();
 		}
 
 		state.bootstrapped = true;
@@ -183,7 +289,39 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 
 		lastRemoteRecord = record;
 		state.lastSyncedAt = Date.now();
+		state.isPublic = record.isPublic;
 		state.remoteExists = true;
+	}
+
+	async function maybeApplyQueuedRemoteRecord(): Promise<void> {
+		if (!queuedRemoteRecord || shouldDeferSyncActivity() || state.pendingWrite) {
+			return;
+		}
+
+		const record = queuedRemoteRecord;
+		queuedRemoteRecord = null;
+
+		if (!record.snapshot) {
+			lastRemoteRecord = record;
+			return;
+		}
+
+		const localPayload = createWorkspacePayload(
+			graph.exportSnapshot(),
+			currentUserUid ?? 'local',
+			state.projectName,
+			state.isPublic
+		);
+
+		if (record.flatHash === localPayload.flatHash) {
+			lastRemoteRecord = record;
+			state.pendingWrite = false;
+			state.status = 'synced';
+			state.lastSyncedAt = Date.now();
+			return;
+		}
+
+		await applyRemoteRecord(record);
 	}
 
 	async function flushRemoteWrite(): Promise<void> {
@@ -204,7 +342,12 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		}
 
 		const snapshot = graph.exportSnapshot();
-		const payload = createWorkspacePayload(snapshot, currentUserUid, state.projectName);
+		const payload = createWorkspacePayload(
+			snapshot,
+			currentUserUid,
+			state.projectName,
+			state.isPublic
+		);
 
 		if (lastRemoteRecord?.flatHash === payload.flatHash) {
 			state.pendingWrite = false;
@@ -216,8 +359,51 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		state.pendingWrite = true;
 		state.status = 'syncing';
 
+		if (!navigator.onLine) {
+			state.error = null;
+			return;
+		}
+
+		if (shouldDeferSyncActivity()) {
+			pendingTimer = setTimeout(() => {
+				void flushRemoteWrite();
+			}, 700);
+			return;
+		}
+
 		try {
-			const wrote = await writeWorkspacePayload(nextDb, currentUserUid, payload, lastRemoteRecord);
+			const thumbnailEquationHash = buildThumbnailEquationHash(snapshot);
+			let thumbnailDataUrl = lastThumbnailDataUrl;
+
+			if (graph.backgroundImages.length > 0) {
+				thumbnailDataUrl = null;
+				lastThumbnailDataUrl = null;
+				lastThumbnailEquationHash = '';
+			} else if (thumbnailEquationHash !== lastThumbnailEquationHash) {
+				const thumbnailBlob = await graph.exportPNG(1);
+				thumbnailDataUrl =
+					thumbnailBlob && thumbnailBlob.size <= THUMBNAIL_DATA_URL_LIMIT
+						? await blobToDataUrl(thumbnailBlob).catch(() => null)
+						: null;
+				lastThumbnailEquationHash = thumbnailEquationHash;
+				lastThumbnailDataUrl =
+					thumbnailDataUrl && thumbnailDataUrl.length <= THUMBNAIL_DATA_URL_LIMIT
+						? thumbnailDataUrl
+						: null;
+			}
+			const wrote = await writeWorkspacePayload(
+				nextDb,
+				currentUserUid,
+				payload,
+				lastRemoteRecord,
+				currentWorkspaceId,
+				{
+					thumbnailDataUrl:
+						thumbnailDataUrl && thumbnailDataUrl.length <= THUMBNAIL_DATA_URL_LIMIT
+							? thumbnailDataUrl
+							: null
+				}
+			);
 			state.pendingWrite = false;
 
 			if (!wrote) {
@@ -230,12 +416,14 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 				exists: true,
 				flatHash: payload.flatHash,
 				hashes: payload.hashes,
+				isPublic: payload.meta.isPublic,
 				name: payload.meta.name,
 				snapshot: payload.snapshot
 			};
 			state.status = 'synced';
 			state.lastSyncedAt = Date.now();
 			state.remoteExists = true;
+			await maybeApplyQueuedRemoteRecord();
 		} catch (error) {
 			state.pendingWrite = false;
 			state.status = 'error';
@@ -259,21 +447,24 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 
 		clearPendingTimer();
 		state.pendingWrite = true;
+		const snapshotJson = currentUserUid ? null : graph.exportJSON(false);
 
 		if (currentUserUid) {
 			state.status = 'syncing';
-			pendingTimer = setTimeout(() => {
-				void flushRemoteWrite();
-			}, delay);
+			pendingTimer = setTimeout(
+				() => {
+					void flushRemoteWrite();
+				},
+				shouldDeferSyncActivity() ? Math.max(delay, 1400) : delay
+			);
 			return;
 		}
 
 		pendingTimer = setTimeout(() => {
 			try {
-				const snapshot = graph.exportJSON(false);
-
-				if (snapshot.length <= LOCAL_SESSION_LIMIT) {
-					localStorage.setItem(LOCAL_SESSION_KEY, snapshot);
+				if (snapshotJson && snapshotJson.length <= LOCAL_SESSION_LIMIT) {
+					localStorage.setItem(LOCAL_SESSION_KEY, snapshotJson);
+					localStorage.setItem(LOCAL_SESSION_TOUCHED_KEY, '1');
 				}
 
 				state.status = 'local';
@@ -306,6 +497,7 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 			uid,
 			async (record) => {
 				state.projectName = record.name;
+				state.isPublic = record.isPublic;
 				state.remoteExists = record.exists;
 
 				if (!initialRemoteHandled) {
@@ -361,17 +553,24 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 				const localPayload = createWorkspacePayload(
 					graph.exportSnapshot(),
 					currentUserUid ?? uid,
-					state.projectName
+					state.projectName,
+					state.isPublic
 				);
 
 				lastRemoteRecord = record;
 
 				if (!record.snapshot || record.flatHash === localPayload.flatHash) {
+					queuedRemoteRecord = null;
 					state.pendingWrite = false;
 					state.status = 'synced';
 					if (record.snapshot) {
 						state.lastSyncedAt = Date.now();
 					}
+					return;
+				}
+
+				if (shouldDeferSyncActivity() || state.pendingWrite) {
+					queuedRemoteRecord = record;
 					return;
 				}
 
@@ -381,7 +580,8 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 				state.pendingWrite = false;
 				state.status = 'error';
 				state.error = normalizeSyncError(error);
-			}
+			},
+			currentWorkspaceId
 		);
 	}
 
@@ -390,6 +590,7 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		options: {
 			preferCurrentGraph?: boolean;
 			sharedSnapshot?: string | null;
+			workspaceId?: string;
 		} = {}
 	): Promise<void> {
 		if (!browser) {
@@ -398,6 +599,9 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 
 		state.error = null;
 		pendingSharedSnapshot = options.sharedSnapshot ?? null;
+		currentWorkspaceId = options.workspaceId?.trim() || 'default';
+		state.workspaceId = currentWorkspaceId;
+		queuedRemoteRecord = null;
 
 		if (!user) {
 			await restoreLocalWorkspace(options.sharedSnapshot ?? null);
@@ -429,11 +633,31 @@ export function createWorkspaceSyncState(graph: GraphState, ui: UiState) {
 		clearPendingTimer();
 		clearWorkspaceSubscription();
 		currentUserUid = null;
+		currentWorkspaceId = 'default';
 		pendingSharedSnapshot = null;
+		if (browser) {
+			window.removeEventListener('online', handleOnline);
+		}
 	}
 
 	return Object.assign(state, {
 		configureSession,
+		async setPublic(nextValue: boolean) {
+			const nextDb = getDb();
+
+			if (!nextDb || !currentUserUid) {
+				return;
+			}
+
+			await setWorkspacePublic(nextDb, currentUserUid, currentWorkspaceId, nextValue);
+			state.isPublic = nextValue;
+			if (lastRemoteRecord) {
+				lastRemoteRecord = {
+					...lastRemoteRecord,
+					isPublic: nextValue
+				};
+			}
+		},
 		destroy,
 		schedulePersist
 	});

@@ -253,7 +253,8 @@ self.onmessage = (event: MessageEvent<unknown>) => {
 						kind: equation.kind,
 						color: equation.color,
 						paramRange: equation.paramRange,
-						evaluate: (x: number) => evaluateCartesianAt(parsed.node, x, request.variables)
+						evaluate: (x: number) =>
+							evaluateCartesianAt(parsed.compiledExpression ?? parsed.node, x, request.variables)
 					});
 					continue;
 				}
@@ -330,7 +331,7 @@ self.onmessage = (event: MessageEvent<unknown>) => {
 		}
 
 		const { parsed, evaluate } = evaluateCartesian(request.raw, request.kind, request.variables);
-		if (!parsed.node || request.kind !== 'cartesian') {
+		if ((!parsed.node && !parsed.compiledExpression) || request.kind !== 'cartesian') {
 			self.postMessage({ type: request.type, key: request.key, result: null });
 			return;
 		}

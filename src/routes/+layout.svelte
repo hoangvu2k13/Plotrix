@@ -18,6 +18,19 @@
 		)
 			? 'supported'
 			: 'unsupported';
+
+		if ('serviceWorker' in navigator) {
+			if (import.meta.env.DEV) {
+				void navigator.serviceWorker
+					.getRegistrations()
+					.then((registrations) =>
+						Promise.all(registrations.map((registration) => registration.unregister()))
+					);
+				return;
+			}
+
+			void navigator.serviceWorker.register('/sw.js', { scope: '/' });
+		}
 	});
 </script>
 

@@ -1,18 +1,21 @@
 <script lang="ts">
 	import { X } from '@lucide/svelte';
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import { fade, fly } from 'svelte/transition';
 
 	import Icon from '$components/Icon.svelte';
+	import { createOutsideClickRegistry } from '$utils/outsideClick';
 
 	type ModalRegistration = {
 		close: () => void;
 		isOpen: () => boolean;
+		root: () => HTMLElement | null;
 	};
 
 	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const openModals = new Set<ModalRegistration>();
+	const outsideClickRegistry = createOutsideClickRegistry();
 	let keyListenerAttached = false;
 
 	function handleSharedKeydown(event: KeyboardEvent): void {
@@ -58,55 +61,39 @@
 		onClose?: () => void;
 		children?: Snippet;
 	}>();
-	let registration: ModalRegistration | null = null;
-
-	function handleBackdropPointerDown(event: PointerEvent): void {
-		if (event.target === event.currentTarget) {
+	let panel = $state<HTMLElement | null>(null);
+	const registration: ModalRegistration = {
+		close: () => {
 			onClose();
-		}
-	}
+		},
+		isOpen: () => open,
+		root: () => panel
+	};
 
 	$effect(() => {
-		if (!registration) {
-			return;
-		}
-
 		if (open) {
 			openModals.add(registration);
+			outsideClickRegistry.add(registration);
 			ensureSharedKeydownListener();
 			return;
 		}
 
 		openModals.delete(registration);
+		outsideClickRegistry.delete(registration);
 		maybeRemoveSharedKeydownListener();
 	});
 
-	onMount(() => {
-		registration = {
-			close: () => {
-				onClose();
-			},
-			isOpen: () => open
-		};
-	});
-
 	onDestroy(() => {
-		if (registration) {
-			openModals.delete(registration);
-		}
-
+		openModals.delete(registration);
+		outsideClickRegistry.delete(registration);
 		maybeRemoveSharedKeydownListener();
 	});
 </script>
 
 {#if open}
-	<div
-		class="modal-backdrop"
-		role="presentation"
-		onpointerdown={handleBackdropPointerDown}
-		transition:fade
-	>
+	<div class="modal-backdrop" role="presentation" transition:fade>
 		<section
+			bind:this={panel}
 			class="modal-panel"
 			role="dialog"
 			aria-modal="true"

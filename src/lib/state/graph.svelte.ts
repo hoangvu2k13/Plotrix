@@ -56,6 +56,69 @@ export interface GraphAnnotation {
 	color: string;
 }
 
+export interface TangentLine {
+	id: string;
+	equationId: string;
+	x: number;
+	color: string;
+	visible: boolean;
+	lineStyle: PlotEquation['lineStyle'];
+	lineWidth: number;
+	opacity: number;
+}
+
+export interface IntegralShading {
+	id: string;
+	equationId: string;
+	xMin: number;
+	xMax: number;
+	color: string;
+	visible: boolean;
+	showValue: boolean;
+	label?: string | null;
+	percentage?: boolean;
+}
+
+export interface ConstrainedPoint {
+	id: string;
+	equationId: string;
+	x: number;
+	label: string;
+	color: string;
+	showCoordinates: boolean;
+	visible: boolean;
+}
+
+export interface EquationFolder {
+	id: string;
+	name: string;
+	equationIds: string[];
+	collapsed: boolean;
+	visible: boolean;
+	color: string;
+}
+
+export interface CalibrationPoint {
+	x: number;
+	y: number;
+}
+
+export interface CalibrationState {
+	imagePoint1: CalibrationPoint;
+	imagePoint2: CalibrationPoint;
+	mathPoint1: CalibrationPoint;
+	mathPoint2: CalibrationPoint;
+}
+
+export interface BackgroundImage {
+	id: string;
+	dataUrl: string;
+	width: number;
+	height: number;
+	opacity: number;
+	calibration: CalibrationState | null;
+}
+
 export interface PlotEquation {
 	id: string;
 	raw: string;
@@ -76,6 +139,9 @@ export interface PlotEquation {
 	parametricNodes: ParametricNodes | null;
 	inequality: InequalityNodes | null;
 	freeVariables: string[];
+	condition: string | null;
+	conditionCompiled: EvalFunction | null;
+	conditionError: string | null;
 }
 
 export interface ViewState {
@@ -120,6 +186,7 @@ export interface GraphSnapshot {
 		label: string;
 		showMarkers: boolean;
 		paramRange: [number, number];
+		condition: string | null;
 	}>;
 	view: Omit<ViewState, 'isPanning' | 'isAnimating'>;
 	settings: GraphSettings;
@@ -127,6 +194,10 @@ export interface GraphSnapshot {
 	dataSeries: DataSeries[];
 	regressionResults: RegressionResult[];
 	annotations: GraphAnnotation[];
+	tangentLines: TangentLine[];
+	integralShadings: IntegralShading[];
+	constrainedPoints: ConstrainedPoint[];
+	folders: EquationFolder[];
 }
 
 interface ImportGraphOptions {
@@ -168,7 +239,7 @@ const DEFAULT_SETTINGS: GraphSettings = {
 	showCriticalPoints: true,
 	showIntersections: true
 };
-const STARTER_EQUATIONS: Array<{ raw: string; kind: EquationKind }> = [
+export const STARTER_EQUATIONS: Array<{ raw: string; kind: EquationKind }> = [
 	{ raw: 'sin(x)', kind: 'cartesian' },
 	{ raw: '0.35x*cos(x)', kind: 'cartesian' },
 	{ raw: 'x(t)=3cos(t); y(t)=2sin(t)', kind: 'parametric' }
@@ -179,7 +250,9 @@ const ALLOWED_KINDS = new Set<EquationKind>([
 	'polar',
 	'parametric',
 	'implicit',
-	'inequality'
+	'inequality',
+	'slopefield',
+	'vectorfield'
 ]);
 const ALLOWED_THEMES = new Set<GraphSettings['theme']>(['system', 'light', 'dark']);
 const ALLOWED_GRID_STYLES = new Set<GraphSettings['gridStyle']>(['cartesian', 'polar']);
@@ -194,6 +267,10 @@ const MAX_HISTORY_ENTRIES = 20;
 const MAX_HISTORY_BYTES = 10 * 1024 * 1024;
 const MAX_ANALYSIS_CACHE_ENTRIES = 200;
 const MAX_ANNOTATIONS = 48;
+const MAX_TANGENT_LINES = 48;
+const MAX_INTEGRAL_SHADINGS = 48;
+const MAX_CONSTRAINED_POINTS = 48;
+const MAX_FOLDERS = 24;
 
 function base64UrlEncode(value: string): string {
 	const bytes = new TextEncoder().encode(value);
@@ -217,7 +294,13 @@ function base64UrlDecode(value: string): string {
 
 	const binary = atob(padded);
 	const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-	return new TextDecoder().decode(bytes);
+	const decoded = new TextDecoder().decode(bytes);
+
+	if (decoded.length > MAX_URL_SNAPSHOT_BYTES) {
+		throw new Error('Shared Plotrix URL is too large to decode safely.');
+	}
+
+	return decoded;
 }
 
 function clampRegressionResults(input: unknown): RegressionResult[] {
@@ -333,7 +416,11 @@ function validateEquations(input: unknown): GraphSnapshot['equations'] {
 						asFiniteNumber(equation.paramRange[0], -10, -1e6, 1e6),
 						asFiniteNumber(equation.paramRange[1], 10, -1e6, 1e6)
 					]
-				: [-10, 10]
+				: [-10, 10],
+			condition:
+				typeof equation.condition === 'string' && isSafeExpressionInput(equation.condition)
+					? equation.condition.trim() || null
+					: null
 		});
 	}
 
@@ -381,18 +468,39 @@ function validateDataSeries(input: unknown): DataSeries[] {
 						width: asFiniteNumber(column?.width, 120, 72, 240)
 					}))
 				: base.columns;
-		const rows = Array.isArray(value.rows)
-			? value.rows.slice(0, MAX_DATA_ROWS).map((row) =>
-					Array.from({ length: columns.length }, (_, columnIndex) => {
-						totalCells += 1;
-						if (totalCells > MAX_IMPORT_CELLS) return '';
-						const cell = Array.isArray(row) ? row[columnIndex] : '';
-						if (typeof cell !== 'string') return '';
-						const numeric = Number(cell);
-						return Number.isFinite(numeric) ? `${numeric}`.slice(0, MAX_CELL_CHARS) : '';
-					})
-				)
-			: base.rows;
+		const rows: string[][] = [];
+		const rawRows = Array.isArray(value.rows) ? value.rows : [];
+		const rowCount = Math.min(rawRows.length, MAX_DATA_ROWS);
+
+		for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+			const row: string[] = new Array(columns.length);
+			const sourceRow = Array.isArray(rawRows[rowIndex]) ? (rawRows[rowIndex] as unknown[]) : null;
+
+			for (let columnIndex = 0; columnIndex < columns.length; columnIndex += 1) {
+				totalCells += 1;
+
+				if (totalCells > MAX_IMPORT_CELLS) {
+					row[columnIndex] = '';
+					continue;
+				}
+
+				const cell = sourceRow?.[columnIndex] ?? '';
+
+				if (typeof cell !== 'string') {
+					row[columnIndex] = '';
+					continue;
+				}
+
+				const numeric = Number(cell);
+				row[columnIndex] = Number.isFinite(numeric) ? `${numeric}`.slice(0, MAX_CELL_CHARS) : '';
+			}
+
+			rows.push(row);
+		}
+
+		while (rows.length < base.rows.length) {
+			rows.push(new Array(columns.length).fill(''));
+		}
 
 		return {
 			...base,
@@ -448,6 +556,143 @@ function validateAnnotations(input: unknown): GraphAnnotation[] {
 		.filter((entry): entry is GraphAnnotation => entry !== null);
 }
 
+function validateTangentLines(input: unknown): TangentLine[] {
+	if (!Array.isArray(input)) {
+		return [];
+	}
+
+	return input
+		.slice(0, MAX_TANGENT_LINES)
+		.map((entry) => {
+			if (!entry || typeof entry !== 'object') {
+				return null;
+			}
+
+			const tangent = entry as Partial<TangentLine>;
+
+			if (typeof tangent.equationId !== 'string' || typeof tangent.color !== 'string') {
+				return null;
+			}
+
+			return {
+				id: typeof tangent.id === 'string' ? tangent.id : nanoid(),
+				equationId: tangent.equationId,
+				x: asFiniteNumber(tangent.x, 0, -1e7, 1e7),
+				color: tangent.color,
+				visible: Boolean(tangent.visible ?? true),
+				lineStyle:
+					tangent.lineStyle && ALLOWED_LINE_STYLES.has(tangent.lineStyle)
+						? tangent.lineStyle
+						: 'dashed',
+				lineWidth: asFiniteNumber(tangent.lineWidth, 2, 1, 6),
+				opacity: asFiniteNumber(tangent.opacity, 0.95, 0.1, 1)
+			};
+		})
+		.filter((entry): entry is TangentLine => entry !== null);
+}
+
+function validateIntegralShadings(input: unknown): IntegralShading[] {
+	if (!Array.isArray(input)) {
+		return [];
+	}
+
+	const next: IntegralShading[] = [];
+
+	for (const entry of input.slice(0, MAX_INTEGRAL_SHADINGS)) {
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+
+		const shading = entry as Partial<IntegralShading>;
+
+		if (typeof shading.equationId !== 'string' || typeof shading.color !== 'string') {
+			continue;
+		}
+
+		const xMin = asFiniteNumber(shading.xMin, -1, -1e7, 1e7);
+		const xMax = asFiniteNumber(shading.xMax, 1, -1e7, 1e7);
+
+		next.push({
+			id: typeof shading.id === 'string' ? shading.id : nanoid(),
+			equationId: shading.equationId,
+			xMin: Math.min(xMin, xMax),
+			xMax: Math.max(xMin, xMax),
+			color: shading.color,
+			visible: Boolean(shading.visible ?? true),
+			showValue: Boolean(shading.showValue ?? true),
+			label: typeof shading.label === 'string' ? shading.label.slice(0, 64) : null,
+			percentage: Boolean(shading.percentage ?? false)
+		});
+	}
+
+	return next;
+}
+
+function validateConstrainedPoints(input: unknown): ConstrainedPoint[] {
+	if (!Array.isArray(input)) {
+		return [];
+	}
+
+	return input
+		.slice(0, MAX_CONSTRAINED_POINTS)
+		.map((entry) => {
+			if (!entry || typeof entry !== 'object') {
+				return null;
+			}
+
+			const point = entry as Partial<ConstrainedPoint>;
+
+			if (typeof point.equationId !== 'string' || typeof point.color !== 'string') {
+				return null;
+			}
+
+			return {
+				id: typeof point.id === 'string' ? point.id : nanoid(),
+				equationId: point.equationId,
+				x: asFiniteNumber(point.x, 0, -1e7, 1e7),
+				label: typeof point.label === 'string' ? point.label.slice(0, 64) : '',
+				color: point.color,
+				showCoordinates: Boolean(point.showCoordinates ?? true),
+				visible: Boolean(point.visible ?? true)
+			};
+		})
+		.filter((entry): entry is ConstrainedPoint => entry !== null);
+}
+
+function validateFolders(input: unknown): EquationFolder[] {
+	if (!Array.isArray(input)) {
+		return [];
+	}
+
+	return input
+		.slice(0, MAX_FOLDERS)
+		.map((entry, index) => {
+			if (!entry || typeof entry !== 'object') {
+				return null;
+			}
+
+			const folder = entry as Partial<EquationFolder>;
+
+			return {
+				id: typeof folder.id === 'string' ? folder.id : nanoid(),
+				name:
+					typeof folder.name === 'string' && folder.name.trim().length
+						? folder.name.trim().slice(0, 80)
+						: `Folder ${index + 1}`,
+				equationIds: Array.isArray(folder.equationIds)
+					? folder.equationIds.filter((value): value is string => typeof value === 'string')
+					: [],
+				collapsed: Boolean(folder.collapsed ?? false),
+				visible: Boolean(folder.visible ?? true),
+				color:
+					typeof folder.color === 'string'
+						? folder.color
+						: COLOR_PALETTE[index % COLOR_PALETTE.length]!
+			};
+		})
+		.filter((entry): entry is EquationFolder => entry !== null);
+}
+
 function createDefaultVariable(name: string, current?: Partial<Variable>): Variable {
 	return {
 		name,
@@ -492,6 +737,45 @@ function parseEquationState(raw: string, kind: EquationKind) {
 	};
 }
 
+function parseConditionState(condition: string | null | undefined): {
+	compiled: EvalFunction | null;
+	error: string | null;
+	value: string | null;
+} {
+	const trimmed = typeof condition === 'string' ? condition.trim() : '';
+
+	if (!trimmed.length) {
+		return { compiled: null, error: null, value: null };
+	}
+
+	if (!isSafeExpressionInput(trimmed)) {
+		return {
+			compiled: null,
+			error: 'Conditional visibility contains unsupported tokens.',
+			value: trimmed
+		};
+	}
+
+	const parsed = parseEquation(trimmed, 'cartesian');
+	const reserved = parsed.freeVariables.filter(
+		(value) => value === 'x' || value === 'y' || value === 't'
+	);
+
+	if (reserved.length) {
+		return {
+			compiled: null,
+			error: 'Conditional visibility may only use slider variables.',
+			value: trimmed
+		};
+	}
+
+	return {
+		compiled: parsed.compiledExpression ?? null,
+		error: parsed.error,
+		value: trimmed
+	};
+}
+
 function createEquation(
 	raw: string,
 	color: string,
@@ -499,6 +783,7 @@ function createEquation(
 ): PlotEquation {
 	const kind = overrides.kind ?? 'cartesian';
 	const parsed = parseEquationState(raw, kind);
+	const conditionState = parseConditionState(overrides.condition);
 
 	return {
 		id: overrides.id ?? nanoid(),
@@ -519,7 +804,10 @@ function createEquation(
 		renderTimeMs: overrides.renderTimeMs ?? 0,
 		parametricNodes: parsed.parametricNodes,
 		inequality: parsed.inequality,
-		freeVariables: parsed.freeVariables
+		freeVariables: parsed.freeVariables,
+		condition: conditionState.value,
+		conditionCompiled: conditionState.compiled ?? null,
+		conditionError: conditionState.error
 	};
 }
 
@@ -531,6 +819,10 @@ function createSnapshot(graph: {
 	dataSeries: DataSeries[];
 	regressionResults: RegressionResult[];
 	annotations: GraphAnnotation[];
+	tangentLines: TangentLine[];
+	integralShadings: IntegralShading[];
+	constrainedPoints: ConstrainedPoint[];
+	folders: EquationFolder[];
 }): GraphSnapshot {
 	return {
 		version: 2,
@@ -545,7 +837,8 @@ function createSnapshot(graph: {
 			visible: equation.visible,
 			label: equation.label,
 			showMarkers: equation.showMarkers,
-			paramRange: [...equation.paramRange] as [number, number]
+			paramRange: [...equation.paramRange] as [number, number],
+			condition: equation.condition
 		})),
 		view: {
 			originX: graph.view.originX,
@@ -574,7 +867,14 @@ function createSnapshot(graph: {
 
 			return next;
 		}),
-		annotations: graph.annotations.map((annotation) => ({ ...annotation }))
+		annotations: graph.annotations.map((annotation) => ({ ...annotation })),
+		tangentLines: graph.tangentLines.map((tangent) => ({ ...tangent })),
+		integralShadings: graph.integralShadings.map((shading) => ({ ...shading })),
+		constrainedPoints: graph.constrainedPoints.map((point) => ({ ...point })),
+		folders: graph.folders.map((folder) => ({
+			...folder,
+			equationIds: [...folder.equationIds]
+		}))
 	};
 }
 
@@ -620,7 +920,11 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 			variables: validateVariables(snapshot.variables),
 			dataSeries: validateDataSeries(snapshot.dataSeries),
 			regressionResults: clampRegressionResults(snapshot.regressionResults),
-			annotations: validateAnnotations(snapshot.annotations)
+			annotations: validateAnnotations(snapshot.annotations),
+			tangentLines: validateTangentLines(snapshot.tangentLines),
+			integralShadings: validateIntegralShadings(snapshot.integralShadings),
+			constrainedPoints: validateConstrainedPoints(snapshot.constrainedPoints),
+			folders: validateFolders(snapshot.folders)
 		};
 	}
 
@@ -664,7 +968,11 @@ function deserializeSnapshot(source: string): GraphSnapshot {
 			variables: [],
 			dataSeries: validateDataSeries([]),
 			regressionResults: [],
-			annotations: []
+			annotations: [],
+			tangentLines: [],
+			integralShadings: [],
+			constrainedPoints: [],
+			folders: []
 		};
 	}
 
@@ -680,19 +988,32 @@ export function createGraphState() {
 		variables: [] as Variable[],
 		dataSeries: [defaultDataSeries(0)] as DataSeries[],
 		annotations: [] as GraphAnnotation[],
+		tangentLines: [] as TangentLine[],
+		integralShadings: [] as IntegralShading[],
+		constrainedPoints: [] as ConstrainedPoint[],
+		folders: [] as EquationFolder[],
+		backgroundImagesVersion: 0,
 		analysisCache: new LruMap<string, EquationAnalysis>(MAX_ANALYSIS_CACHE_ENTRIES),
 		regressionResults: [] as RegressionResult[],
 		variablesHash: '',
 		historyIndex: 0,
 		historySize: 0
 	});
+	const backgroundImages: BackgroundImage[] = [];
+	type HistoryEntry = {
+		byteSize: number;
+		compressed: Uint8Array | null;
+		compressPromise: Promise<void> | null;
+		serialized: string | null;
+		snapshot: GraphSnapshot | null;
+	};
 
 	let exporter: GraphExporter | null = null;
-	let history: GraphSnapshot[] = [];
-	let historyByteSizes: number[] = [];
+	let history: HistoryEntry[] = [];
 	let historyBytes = 0;
 	let lastHistoryJson = '';
 	let pendingHistoryTimer: ReturnType<typeof setTimeout> | null = null;
+	let pendingHistoryCompressionTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingAnalysisInvalidationTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastHistoryMeta: { kind: string; target: string; at: number } | null = null;
 	const criticalPointCache = new LruMap<string, CriticalPoint[]>(MAX_ANALYSIS_CACHE_ENTRIES);
@@ -713,8 +1034,35 @@ export function createGraphState() {
 	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const analysisFailures = new Set<string>();
 	let analysisWorker: Worker | null = null;
-	let memoizedVariableScope: Record<string, number> = {};
-	let lastVariableSnapshot = [] as Array<{ name: string; value: number }>;
+	let workerRestartAttempts = 0;
+	const MAX_WORKER_RESTARTS = 5;
+	let workerRestartReadyAt = 0;
+	let workerRestartTimer: ReturnType<typeof setTimeout> | null = null;
+	let memoizedVariableScope: Record<string, number> = Object.create(null) as Record<string, number>;
+	let lastVariablesKey = '';
+	let lastIntersectionPostTime = 0;
+	const INTERSECTION_DEBOUNCE_MS = 80;
+
+	function canUseHistoryCompression(): boolean {
+		return typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+	}
+
+	async function compressHistoryText(value: string): Promise<Uint8Array | null> {
+		if (!canUseHistoryCompression()) {
+			return null;
+		}
+
+		const stream = new Blob([value]).stream().pipeThrough(new CompressionStream('gzip'));
+		const buffer = await new Response(stream).arrayBuffer();
+		return new Uint8Array(buffer);
+	}
+
+	async function decompressHistoryText(value: Uint8Array): Promise<string> {
+		const copy = new Uint8Array(value.byteLength);
+		copy.set(value);
+		const stream = new Blob([copy]).stream().pipeThrough(new DecompressionStream('gzip'));
+		return new Response(stream).text();
+	}
 
 	function rememberAnalysisFailure(key: string): void {
 		analysisFailures.delete(key);
@@ -737,12 +1085,30 @@ export function createGraphState() {
 		pendingFitRequests.clear();
 		analysisWorker?.terminate();
 		analysisWorker = null;
+		workerRestartAttempts += 1;
+		if (workerRestartAttempts <= MAX_WORKER_RESTARTS) {
+			const delay = Math.min(100 * 2 ** workerRestartAttempts, 3000);
+			workerRestartReadyAt = Date.now() + delay;
+			if (workerRestartTimer) {
+				clearTimeout(workerRestartTimer);
+			}
+			workerRestartTimer = setTimeout(() => {
+				workerRestartTimer = null;
+				workerRestartReadyAt = 0;
+				ensureAnalysisWorker();
+				requestRender();
+			}, delay);
+		}
 		requestRender();
 	}
 
 	function ensureAnalysisWorker(): Worker | null {
 		if (analysisWorker || typeof window === 'undefined' || typeof Worker === 'undefined') {
 			return analysisWorker;
+		}
+
+		if (workerRestartReadyAt && Date.now() < workerRestartReadyAt) {
+			return null;
 		}
 
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity
@@ -762,6 +1128,8 @@ export function createGraphState() {
 			if (!data || typeof data.type !== 'string' || typeof data.key !== 'string') {
 				return;
 			}
+
+			workerRestartAttempts = 0;
 
 			if (data.error) {
 				if (data.type === 'criticalPoints') {
@@ -872,28 +1240,29 @@ export function createGraphState() {
 	}
 
 	function variableScope(): Record<string, number> {
-		const nextSnapshot = graph.variables.map((variable) => ({
-			name: variable.name,
-			value: variable.value
-		}));
-		const changed =
-			nextSnapshot.length !== lastVariableSnapshot.length ||
-			nextSnapshot.some((entry, index) => {
-				const previous = lastVariableSnapshot[index];
-				return previous?.name !== entry.name || previous.value !== entry.value;
-			});
+		const variables = graph.variables;
+		let key = '';
 
-		if (changed) {
-			lastVariableSnapshot = nextSnapshot;
-			memoizedVariableScope = Object.fromEntries(
-				nextSnapshot.map((variable) => [variable.name, variable.value])
-			);
-			graph.variablesHash = nextSnapshot
-				.map((variable) => `${variable.name}:${variable.value}`)
-				.join('|');
+		for (let index = 0; index < variables.length; index += 1) {
+			const variable = variables[index]!;
+			key += `${variable.name}:${variable.value}|`;
 		}
 
-		return memoizedVariableScope;
+		if (key === lastVariablesKey) {
+			return memoizedVariableScope;
+		}
+
+		lastVariablesKey = key;
+		graph.variablesHash = key;
+		const scope = Object.create(null) as Record<string, number>;
+
+		for (let index = 0; index < variables.length; index += 1) {
+			const variable = variables[index]!;
+			scope[variable.name] = variable.value;
+		}
+
+		memoizedVariableScope = scope;
+		return scope;
 	}
 
 	function applyFitBounds(bounds: {
@@ -1000,13 +1369,21 @@ export function createGraphState() {
 			for (const variable of equation.freeVariables) {
 				names.add(variable);
 			}
+
+			if (equation.condition) {
+				for (const variable of parseEquation(equation.condition, 'cartesian').freeVariables) {
+					if (variable !== 'x' && variable !== 'y' && variable !== 't') {
+						names.add(variable);
+					}
+				}
+			}
 		}
 
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const current = new Map(graph.variables.map((variable) => [variable.name, variable]));
 		const next = [...names].sort().map((name) => createDefaultVariable(name, current.get(name)));
 		graph.variables.splice(0, graph.variables.length, ...next);
-		lastVariableSnapshot = [];
+		lastVariablesKey = '';
 		variableScope();
 	}
 
@@ -1030,40 +1407,148 @@ export function createGraphState() {
 		}
 	}
 
+	function clearPendingHistoryCompression(): void {
+		if (pendingHistoryCompressionTimer) {
+			clearTimeout(pendingHistoryCompressionTimer);
+			pendingHistoryCompressionTimer = null;
+		}
+	}
+
+	function recalculateHistoryBytes(): void {
+		historyBytes = history.reduce((sum, item) => sum + item.byteSize, 0);
+	}
+
+	function trimHistoryToBudget(): void {
+		while (history.length > MAX_HISTORY_ENTRIES || historyBytes > MAX_HISTORY_BYTES) {
+			const removed = history.shift();
+
+			if (!removed) {
+				break;
+			}
+
+			historyBytes -= removed.byteSize;
+
+			if (graph.historyIndex > 0) {
+				graph.historyIndex -= 1;
+			}
+		}
+
+		if (history.length === 0) {
+			graph.historyIndex = 0;
+		} else {
+			graph.historyIndex = Math.min(graph.historyIndex, history.length - 1);
+		}
+
+		graph.historySize = history.length;
+	}
+
+	async function compressHistoryEntry(entry: HistoryEntry): Promise<void> {
+		if (!entry.serialized || entry.compressPromise || !canUseHistoryCompression()) {
+			return;
+		}
+
+		const serialized = entry.serialized;
+		const originalSize = entry.byteSize;
+
+		entry.compressPromise = compressHistoryText(serialized)
+			.then((compressed) => {
+				if (!compressed || compressed.byteLength >= originalSize) {
+					return;
+				}
+
+				entry.compressed = compressed;
+				entry.serialized = null;
+				entry.snapshot = null;
+				entry.byteSize = compressed.byteLength;
+				recalculateHistoryBytes();
+			})
+			.finally(() => {
+				entry.compressPromise = null;
+			});
+
+		await entry.compressPromise;
+	}
+
+	function scheduleHistoryCompression(delay = 260): void {
+		if (!canUseHistoryCompression()) {
+			return;
+		}
+
+		clearPendingHistoryCompression();
+		pendingHistoryCompressionTimer = setTimeout(() => {
+			pendingHistoryCompressionTimer = null;
+			void (async () => {
+				for (let index = 0; index < history.length; index += 1) {
+					if (index === graph.historyIndex) {
+						continue;
+					}
+
+					await compressHistoryEntry(history[index]!);
+				}
+
+				trimHistoryToBudget();
+			})();
+		}, delay);
+	}
+
+	async function hydrateHistoryEntry(
+		entry: HistoryEntry
+	): Promise<{ serialized: string; snapshot: GraphSnapshot }> {
+		let serialized = entry.serialized;
+
+		if (!serialized) {
+			if (!entry.compressed) {
+				throw new Error('Plotrix history entry is unavailable.');
+			}
+
+			serialized = await decompressHistoryText(entry.compressed);
+			entry.serialized = serialized;
+		}
+
+		if (!entry.snapshot) {
+			entry.snapshot = deserializeSnapshot(serialized);
+		}
+
+		return {
+			serialized,
+			snapshot: entry.snapshot
+		};
+	}
+
 	function commitHistory(kind = 'state', target = 'global', replaceCurrent = false): void {
 		clearPendingHistory();
 		const snapshot = createSnapshot(graph);
 		const serialized = stringifySnapshot(snapshot);
 		const byteSize = serialized.length * 2;
+		const entry: HistoryEntry = {
+			byteSize,
+			compressed: null,
+			compressPromise: null,
+			serialized,
+			snapshot
+		};
 
 		if (serialized === lastHistoryJson) {
 			return;
 		}
 
 		if (replaceCurrent && history.length > 0) {
-			historyBytes -= historyByteSizes[graph.historyIndex] ?? 0;
-			history[graph.historyIndex] = snapshot;
-			historyByteSizes[graph.historyIndex] = byteSize;
+			historyBytes -= history[graph.historyIndex]?.byteSize ?? 0;
+			history[graph.historyIndex] = entry;
 			historyBytes += byteSize;
 		} else {
 			history = history.slice(0, graph.historyIndex + 1);
-			historyByteSizes = historyByteSizes.slice(0, graph.historyIndex + 1);
-			historyBytes = historyByteSizes.reduce((sum, value) => sum + value, 0);
-			history.push(snapshot);
-			historyByteSizes.push(byteSize);
+			recalculateHistoryBytes();
+			history.push(entry);
 			historyBytes += byteSize;
-
-			while (history.length > MAX_HISTORY_ENTRIES || historyBytes > MAX_HISTORY_BYTES) {
-				historyBytes -= historyByteSizes.shift() ?? 0;
-				history.shift();
-			}
 
 			graph.historyIndex = history.length - 1;
 		}
 
-		graph.historySize = history.length;
+		trimHistoryToBudget();
 		lastHistoryJson = serialized;
 		lastHistoryMeta = { kind, target, at: Date.now() };
+		scheduleHistoryCompression();
 	}
 
 	function replaceHistorySnapshot(
@@ -1074,14 +1559,21 @@ export function createGraphState() {
 		clearPendingHistory();
 		const serialized = stringifySnapshot(snapshot);
 		const byteSize = serialized.length * 2;
+		const entry: HistoryEntry = {
+			byteSize,
+			compressed: null,
+			compressPromise: null,
+			serialized,
+			snapshot
+		};
 
-		history = [snapshot];
-		historyByteSizes = [byteSize];
+		history = [entry];
 		historyBytes = byteSize;
 		graph.historyIndex = 0;
 		graph.historySize = 1;
 		lastHistoryJson = serialized;
 		lastHistoryMeta = { kind, target, at: Date.now() };
+		scheduleHistoryCompression();
 	}
 
 	function queueHistory(kind: string, target: string, delay = 180): void {
@@ -1095,6 +1587,10 @@ export function createGraphState() {
 		pendingHistoryTimer = setTimeout(() => {
 			commitHistory(kind, target, replaceCurrent);
 		}, delay);
+	}
+
+	function commitHistoryNow(kind: string, target: string): void {
+		commitHistory(kind, target);
 	}
 
 	async function restoreSnapshot(snapshot: GraphSnapshot): Promise<void> {
@@ -1141,11 +1637,30 @@ export function createGraphState() {
 			...(snapshot.regressionResults ?? [])
 		);
 		graph.annotations.splice(0, graph.annotations.length, ...(snapshot.annotations ?? []));
+		graph.tangentLines.splice(0, graph.tangentLines.length, ...(snapshot.tangentLines ?? []));
+		graph.integralShadings.splice(
+			0,
+			graph.integralShadings.length,
+			...(snapshot.integralShadings ?? [])
+		);
+		graph.constrainedPoints.splice(
+			0,
+			graph.constrainedPoints.length,
+			...(snapshot.constrainedPoints ?? [])
+		);
+		graph.folders.splice(
+			0,
+			graph.folders.length,
+			...(snapshot.folders ?? []).map((folder) => ({
+				...folder,
+				equationIds: [...folder.equationIds]
+			}))
+		);
 		clearEquationAnalysisCache();
 		Object.assign(graph.view, snapshot.view, { isPanning: false, isAnimating: false });
 		Object.assign(graph.settings, { ...DEFAULT_SETTINGS, ...snapshot.settings });
 		syncVariables();
-		lastVariableSnapshot = [];
+		lastVariablesKey = '';
 		bumpRenderVersion(true);
 	}
 
@@ -1153,7 +1668,7 @@ export function createGraphState() {
 		const equation = createEquation(raw, nextColor(), { kind });
 		graph.equations.push(equation);
 		syncVariables();
-		lastVariableSnapshot = [];
+		lastVariablesKey = '';
 		bumpRenderVersion(true);
 		commitHistory('equations', equation.id);
 		return equation;
@@ -1167,8 +1682,31 @@ export function createGraphState() {
 		}
 
 		graph.equations.splice(index, 1);
+		graph.tangentLines.splice(
+			0,
+			graph.tangentLines.length,
+			...graph.tangentLines.filter((entry) => entry.equationId !== id)
+		);
+		graph.integralShadings.splice(
+			0,
+			graph.integralShadings.length,
+			...graph.integralShadings.filter((entry) => entry.equationId !== id)
+		);
+		graph.constrainedPoints.splice(
+			0,
+			graph.constrainedPoints.length,
+			...graph.constrainedPoints.filter((entry) => entry.equationId !== id)
+		);
+		graph.folders.splice(
+			0,
+			graph.folders.length,
+			...graph.folders.map((folder) => ({
+				...folder,
+				equationIds: folder.equationIds.filter((equationId) => equationId !== id)
+			}))
+		);
 		syncVariables();
-		lastVariableSnapshot = [];
+		lastVariablesKey = '';
 		bumpRenderVersion(true);
 		commitHistory('equations', id);
 	}
@@ -1186,6 +1724,8 @@ export function createGraphState() {
 				| 'errorMessage'
 				| 'renderTimeMs'
 				| 'freeVariables'
+				| 'conditionCompiled'
+				| 'conditionError'
 			>
 		>
 	): void {
@@ -1221,7 +1761,7 @@ export function createGraphState() {
 		if (mathChanged) {
 			clearEquationAnalysisCache(current.raw);
 			clearEquationAnalysisCache(next.raw);
-			lastVariableSnapshot = [];
+			lastVariablesKey = '';
 		}
 		bumpRenderVersion(mathChanged);
 		queueHistory('equation-edit', id, patch.raw !== undefined ? 280 : 180);
@@ -1242,8 +1782,14 @@ export function createGraphState() {
 		});
 
 		graph.equations.splice(index + 1, 0, duplicate);
+		for (const folder of graph.folders) {
+			const folderIndex = folder.equationIds.indexOf(id);
+			if (folderIndex !== -1) {
+				folder.equationIds.splice(folderIndex + 1, 0, duplicate.id);
+			}
+		}
 		syncVariables();
-		lastVariableSnapshot = [];
+		lastVariablesKey = '';
 		bumpRenderVersion(true);
 		commitHistory('equations', duplicate.id);
 	}
@@ -1382,23 +1928,70 @@ export function createGraphState() {
 		queueHistory('view', 'pan-to', 120);
 	}
 
+	function computeVisibleDataBounds(): {
+		minX: number;
+		maxX: number;
+		minY: number;
+		maxY: number;
+	} | null {
+		let minX = Number.POSITIVE_INFINITY;
+		let maxX = Number.NEGATIVE_INFINITY;
+		let minY = Number.POSITIVE_INFINITY;
+		let maxY = Number.NEGATIVE_INFINITY;
+
+		for (const series of graph.dataSeries) {
+			if (!series.plotted || !series.visible) {
+				continue;
+			}
+
+			for (let rowIndex = 0; rowIndex < series.rows.length; rowIndex += 1) {
+				const row = series.rows[rowIndex]!;
+				const x = Number(row[0]);
+				const y = Number(row[1]);
+
+				if (!Number.isFinite(x) || !Number.isFinite(y)) {
+					continue;
+				}
+
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+		}
+
+		return Number.isFinite(minX) &&
+			Number.isFinite(minY) &&
+			Number.isFinite(maxX) &&
+			Number.isFinite(maxY)
+			? { minX, maxX, minY, maxY }
+			: null;
+	}
+
 	function fitAll(recordHistory = true): void {
 		const visibleEquations = graph.equations.filter(
-			(equation) => equation.visible && !equation.errorMessage && equation.kind !== 'inequality'
+			(equation) =>
+				equation.visible &&
+				!equation.errorMessage &&
+				equation.kind !== 'inequality' &&
+				equation.kind !== 'slopefield' &&
+				equation.kind !== 'vectorfield'
 		);
 
 		if (!visibleEquations.length) {
 			resetView(recordHistory);
 			return;
 		}
+
 		const scope = variableScope();
 		const fitKey = `fit:${visibleEquations.map((equation) => equation.id).join(',')}:${graph.variablesHash}:${graph.viewport.width}:${graph.viewport.height}`;
 		const worker = ensureAnalysisWorker();
+		const dataBounds = computeVisibleDataBounds();
 
 		if (worker && !pendingFitRequests.has(fitKey)) {
 			pendingFitRequests.set(fitKey, {
 				recordHistory,
-				dataBounds: null
+				dataBounds
 			});
 			worker.postMessage({
 				type: 'fitBounds',
@@ -1420,48 +2013,11 @@ export function createGraphState() {
 					height: graph.viewport.height
 				}
 			});
-		}
-
-		let minX = Number.POSITIVE_INFINITY;
-		let maxX = Number.NEGATIVE_INFINITY;
-		let minY = Number.POSITIVE_INFINITY;
-		let maxY = Number.NEGATIVE_INFINITY;
-
-		for (const series of graph.dataSeries.filter((entry) => entry.plotted && entry.visible)) {
-			for (const row of series.rows) {
-				const x = Number(row[0]);
-				const y = Number(row[1]);
-
-				if (!Number.isFinite(x) || !Number.isFinite(y)) {
-					continue;
-				}
-
-				minX = Math.min(minX, x);
-				maxX = Math.max(maxX, x);
-				minY = Math.min(minY, y);
-				maxY = Math.max(maxY, y);
-			}
-		}
-
-		if (
-			!Number.isFinite(minX) ||
-			!Number.isFinite(minY) ||
-			!Number.isFinite(maxX) ||
-			!Number.isFinite(maxY)
-		) {
-			if (!worker) {
-				resetView(recordHistory);
-			}
 			return;
 		}
 
-		const dataBounds = { minX, maxX, minY, maxY };
-
-		if (worker) {
-			pendingFitRequests.set(fitKey, {
-				recordHistory,
-				dataBounds
-			});
+		if (!dataBounds) {
+			resetView(recordHistory);
 			return;
 		}
 
@@ -1492,7 +2048,7 @@ export function createGraphState() {
 		variable.max = Math.max(variable.min, variable.max);
 		variable.step = Math.max(1e-6, Math.abs(variable.step));
 		variable.value = clamp(variable.value, variable.min, variable.max);
-		lastVariableSnapshot = [];
+		lastVariablesKey = '';
 		requestRender();
 		scheduleAnalysisInvalidation();
 		queueHistory('variables', name, 120);
@@ -1585,6 +2141,313 @@ export function createGraphState() {
 		return annotation;
 	}
 
+	function addTangentLine(equationId: string, x: number): TangentLine | null {
+		const equation = graph.equations.find((entry) => entry.id === equationId);
+
+		if (!equation || equation.kind !== 'cartesian' || !Number.isFinite(x)) {
+			return null;
+		}
+
+		const tangent: TangentLine = {
+			id: nanoid(),
+			equationId,
+			x: clamp(x, -1e7, 1e7),
+			color: equation.color,
+			visible: true,
+			lineStyle: 'dashed',
+			lineWidth: 2,
+			opacity: 0.95
+		};
+
+		graph.tangentLines.push(tangent);
+		bumpRenderVersion(false);
+		commitHistory('tangent-line', tangent.id);
+		return tangent;
+	}
+
+	function updateTangentLine(id: string, patch: Partial<TangentLine>): void {
+		const index = graph.tangentLines.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		const current = graph.tangentLines[index]!;
+		const next: TangentLine = {
+			...current,
+			...patch,
+			x: asFiniteNumber(patch.x, current.x, -1e7, 1e7),
+			lineStyle:
+				patch.lineStyle && ALLOWED_LINE_STYLES.has(patch.lineStyle)
+					? patch.lineStyle
+					: current.lineStyle,
+			lineWidth: asFiniteNumber(patch.lineWidth, current.lineWidth, 1, 6),
+			opacity: asFiniteNumber(patch.opacity, current.opacity, 0.1, 1)
+		};
+
+		graph.tangentLines.splice(index, 1, next);
+		bumpRenderVersion(false);
+		queueHistory('tangent-line', id, 120);
+	}
+
+	function removeTangentLine(id: string): void {
+		const index = graph.tangentLines.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		graph.tangentLines.splice(index, 1);
+		bumpRenderVersion(false);
+		commitHistory('tangent-line', id);
+	}
+
+	function addIntegralShading(
+		equationId: string,
+		xMin: number,
+		xMax: number
+	): IntegralShading | null {
+		const equation = graph.equations.find((entry) => entry.id === equationId);
+
+		if (
+			!equation ||
+			equation.kind !== 'cartesian' ||
+			!Number.isFinite(xMin) ||
+			!Number.isFinite(xMax)
+		) {
+			return null;
+		}
+
+		const shading: IntegralShading = {
+			id: nanoid(),
+			equationId,
+			xMin: clamp(Math.min(xMin, xMax), -1e7, 1e7),
+			xMax: clamp(Math.max(xMin, xMax), -1e7, 1e7),
+			color: equation.color,
+			visible: true,
+			showValue: true
+		};
+
+		graph.integralShadings.push(shading);
+		bumpRenderVersion(false);
+		commitHistory('integral-shading', shading.id);
+		return shading;
+	}
+
+	function updateIntegralShading(id: string, patch: Partial<IntegralShading>): void {
+		const index = graph.integralShadings.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		const current = graph.integralShadings[index]!;
+		const xMin = asFiniteNumber(patch.xMin, current.xMin, -1e7, 1e7);
+		const xMax = asFiniteNumber(patch.xMax, current.xMax, -1e7, 1e7);
+		const next: IntegralShading = {
+			...current,
+			...patch,
+			xMin: Math.min(xMin, xMax),
+			xMax: Math.max(xMin, xMax)
+		};
+
+		graph.integralShadings.splice(index, 1, next);
+		bumpRenderVersion(false);
+		queueHistory('integral-shading', id, 120);
+	}
+
+	function removeIntegralShading(id: string): void {
+		const index = graph.integralShadings.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		graph.integralShadings.splice(index, 1);
+		bumpRenderVersion(false);
+		commitHistory('integral-shading', id);
+	}
+
+	function addConstrainedPoint(equationId: string, x = 0): ConstrainedPoint | null {
+		const equation = graph.equations.find((entry) => entry.id === equationId);
+
+		if (!equation || equation.kind !== 'cartesian') {
+			return null;
+		}
+
+		const point: ConstrainedPoint = {
+			id: nanoid(),
+			equationId,
+			x: asFiniteNumber(x, 0, -1e7, 1e7),
+			label: '',
+			color: equation.color,
+			showCoordinates: true,
+			visible: true
+		};
+
+		graph.constrainedPoints.push(point);
+		graph.constrainedPoints.splice(
+			0,
+			Math.max(0, graph.constrainedPoints.length - MAX_CONSTRAINED_POINTS)
+		);
+		bumpRenderVersion(false);
+		commitHistory('constrained-point', point.id);
+		return point;
+	}
+
+	function updateConstrainedPoint(id: string, patch: Partial<ConstrainedPoint>): void {
+		const index = graph.constrainedPoints.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		const current = graph.constrainedPoints[index]!;
+		const next: ConstrainedPoint = {
+			...current,
+			...patch,
+			x: asFiniteNumber(patch.x, current.x, -1e7, 1e7),
+			label: typeof patch.label === 'string' ? patch.label.slice(0, 64) : current.label
+		};
+
+		graph.constrainedPoints.splice(index, 1, next);
+		bumpRenderVersion(false);
+		queueHistory('constrained-point', id, 120);
+	}
+
+	function removeConstrainedPoint(id: string): void {
+		const index = graph.constrainedPoints.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		graph.constrainedPoints.splice(index, 1);
+		bumpRenderVersion(false);
+		commitHistory('constrained-point', id);
+	}
+
+	function createFolder(name = 'New folder'): EquationFolder {
+		const folder: EquationFolder = {
+			id: nanoid(),
+			name: name.trim() || 'New folder',
+			equationIds: [],
+			collapsed: false,
+			visible: true,
+			color: nextColor(graph.folders.length)
+		};
+
+		graph.folders.push(folder);
+		graph.folders.splice(0, Math.max(0, graph.folders.length - MAX_FOLDERS));
+		commitHistory('folders', folder.id);
+		return folder;
+	}
+
+	function updateFolder(id: string, patch: Partial<EquationFolder>): void {
+		const index = graph.folders.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		const current = graph.folders[index]!;
+		const next: EquationFolder = {
+			...current,
+			...patch,
+			name:
+				typeof patch.name === 'string'
+					? patch.name.trim().slice(0, 80) || current.name
+					: current.name,
+			equationIds: Array.isArray(patch.equationIds)
+				? patch.equationIds.filter((value): value is string => typeof value === 'string')
+				: current.equationIds
+		};
+
+		graph.folders.splice(index, 1, next);
+		bumpRenderVersion(false);
+		queueHistory('folders', id, 120);
+	}
+
+	function deleteFolder(id: string): void {
+		const index = graph.folders.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		graph.folders.splice(index, 1);
+		bumpRenderVersion(false);
+		commitHistory('folders', id);
+	}
+
+	function addEquationToFolder(folderId: string, equationId: string): void {
+		const folder = graph.folders.find((entry) => entry.id === folderId);
+
+		if (!folder) {
+			return;
+		}
+
+		for (const entry of graph.folders) {
+			entry.equationIds = entry.equationIds.filter((id) => id !== equationId);
+		}
+
+		if (!folder.equationIds.includes(equationId)) {
+			folder.equationIds.push(equationId);
+		}
+
+		bumpRenderVersion(false);
+		commitHistory('folders', folderId);
+	}
+
+	function removeEquationFromFolder(folderId: string, equationId: string): void {
+		const folder = graph.folders.find((entry) => entry.id === folderId);
+
+		if (!folder) {
+			return;
+		}
+
+		folder.equationIds = folder.equationIds.filter((id) => id !== equationId);
+		bumpRenderVersion(false);
+		commitHistory('folders', folderId);
+	}
+
+	function reorderFolders(from: number, to: number): void {
+		if (
+			from === to ||
+			from < 0 ||
+			to < 0 ||
+			from >= graph.folders.length ||
+			to >= graph.folders.length
+		) {
+			return;
+		}
+
+		const [folder] = graph.folders.splice(from, 1);
+
+		if (!folder) {
+			return;
+		}
+
+		graph.folders.splice(to, 0, folder);
+		bumpRenderVersion(false);
+		commitHistory('folders', folder.id);
+	}
+
+	function getFolderForEquation(equationId: string): EquationFolder | null {
+		return graph.folders.find((folder) => folder.equationIds.includes(equationId)) ?? null;
+	}
+
+	function isEquationEffectivelyVisible(equationId: string): boolean {
+		const equation = graph.equations.find((entry) => entry.id === equationId);
+
+		if (!equation?.visible) {
+			return false;
+		}
+
+		const folder = getFolderForEquation(equationId);
+		return folder ? folder.visible : true;
+	}
+
 	function setEquationRenderTime(id: string, renderTimeMs: number): void {
 		const equation = graph.equations.find((entry) => entry.id === id);
 
@@ -1667,7 +2530,13 @@ export function createGraphState() {
 		}
 
 		const worker = ensureAnalysisWorker();
-		if (worker && !pendingIntersectionRequests.has(key)) {
+		const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+		if (
+			worker &&
+			!pendingIntersectionRequests.has(key) &&
+			now - lastIntersectionPostTime > INTERSECTION_DEBOUNCE_MS
+		) {
+			lastIntersectionPostTime = now;
 			pendingIntersectionRequests.add(key);
 			worker.postMessage({
 				type: 'intersections',
@@ -1697,7 +2566,11 @@ export function createGraphState() {
 	function getEquationAnalysis(equationId: string): EquationAnalysis | null {
 		const equation = graph.equations.find((entry) => entry.id === equationId);
 
-		if (!equation || !equation.compiled || equation.kind !== 'cartesian') {
+		if (
+			!equation ||
+			(!equation.compiled && !equation.compiledExpression) ||
+			equation.kind !== 'cartesian'
+		) {
 			return null;
 		}
 
@@ -1743,12 +2616,346 @@ export function createGraphState() {
 		return analysisFailures.has(cacheKey);
 	}
 
+	function touchBackgroundImages(): void {
+		graph.backgroundImagesVersion += 1;
+		requestRender();
+	}
+
+	function addBackgroundImage(
+		dataUrl: string,
+		width: number,
+		height: number
+	): BackgroundImage | null {
+		if (
+			typeof dataUrl !== 'string' ||
+			!dataUrl.startsWith('data:image/') ||
+			!Number.isFinite(width) ||
+			!Number.isFinite(height) ||
+			width <= 0 ||
+			height <= 0
+		) {
+			return null;
+		}
+
+		const image: BackgroundImage = {
+			id: nanoid(),
+			dataUrl,
+			width,
+			height,
+			opacity: 0.4,
+			calibration: null
+		};
+
+		backgroundImages.push(image);
+		touchBackgroundImages();
+		return image;
+	}
+
+	function updateBackgroundImage(id: string, patch: Partial<BackgroundImage>): void {
+		const image = backgroundImages.find((entry) => entry.id === id);
+
+		if (!image) {
+			return;
+		}
+
+		if (typeof patch.opacity === 'number' && Number.isFinite(patch.opacity)) {
+			image.opacity = clamp(patch.opacity, 0.05, 1);
+		}
+
+		if (patch.calibration !== undefined) {
+			image.calibration = patch.calibration;
+		}
+
+		touchBackgroundImages();
+	}
+
+	function removeBackgroundImage(id: string): void {
+		const index = backgroundImages.findIndex((entry) => entry.id === id);
+
+		if (index === -1) {
+			return;
+		}
+
+		backgroundImages.splice(index, 1);
+		touchBackgroundImages();
+	}
+
 	async function exportPNG(scale: 1 | 2 | 3): Promise<Blob | null> {
 		return exporter ? exporter.toPNGBlob(scale) : null;
 	}
 
 	function exportSVG(): string {
 		return exporter ? exporter.toSVGString() : '';
+	}
+
+	async function exportPDF(): Promise<Blob> {
+		if (typeof window === 'undefined') {
+			throw new Error('PDF export is only available in the browser.');
+		}
+
+		const svg = exportSVG();
+
+		if (!svg) {
+			throw new Error('PDF export is unavailable until the graph canvas mounts.');
+		}
+
+		const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+		const width = Math.max(1, graph.viewport.width || 1280);
+		const height = Math.max(1, graph.viewport.height || 720);
+		const parser = new DOMParser();
+		const document = parser.parseFromString(svg, 'image/svg+xml');
+
+		if (document.querySelector('parsererror')) {
+			throw new Error('Plotrix could not parse the SVG export safely.');
+		}
+
+		const colorCanvas = window.document.createElement('canvas');
+		const colorContext = colorCanvas.getContext('2d');
+
+		const toPdfColor = (value: string | null) => {
+			if (!value) {
+				return null;
+			}
+
+			const trimmed = value.trim();
+
+			if (!trimmed || trimmed === 'none' || trimmed === 'transparent') {
+				return null;
+			}
+
+			if (!colorContext) {
+				return null;
+			}
+
+			colorContext.fillStyle = '#000000';
+
+			try {
+				colorContext.fillStyle = trimmed;
+			} catch {
+				return null;
+			}
+
+			const normalized = colorContext.fillStyle;
+
+			if (normalized.startsWith('#')) {
+				const hex = normalized.slice(1);
+				const chunk = hex.length === 3 ? 1 : 2;
+				const expand = (entry: string) => (chunk === 1 ? `${entry}${entry}` : entry);
+				const red = parseInt(expand(hex.slice(0, chunk)), 16);
+				const green = parseInt(expand(hex.slice(chunk, chunk * 2)), 16);
+				const blue = parseInt(expand(hex.slice(chunk * 2, chunk * 3)), 16);
+
+				if ([red, green, blue].some((entry) => Number.isNaN(entry))) {
+					return null;
+				}
+
+				return rgb(red / 255, green / 255, blue / 255);
+			}
+
+			const match = normalized.match(/rgba?\(([^)]+)\)/i);
+
+			if (!match) {
+				return null;
+			}
+
+			const channelSource = match[1];
+
+			if (!channelSource) {
+				return null;
+			}
+
+			const channels = channelSource
+				.split(',')
+				.map((entry) => Number.parseFloat(entry.trim()))
+				.slice(0, 3);
+
+			if (channels.length !== 3 || channels.some((entry) => !Number.isFinite(entry))) {
+				return null;
+			}
+
+			return rgb(channels[0]! / 255, channels[1]! / 255, channels[2]! / 255);
+		};
+
+		const toPdfBlob = async (pdf: { save: () => Promise<Uint8Array> }) => {
+			const bytes = await pdf.save();
+			return new Blob([bytes.slice().buffer], { type: 'application/pdf' });
+		};
+
+		const numeric = (value: string | null, fallback = 0) => {
+			if (!value) {
+				return fallback;
+			}
+
+			const next = Number.parseFloat(value);
+			return Number.isFinite(next) ? next : fallback;
+		};
+
+		const opacityOf = (element: Element, fallback = 1) => {
+			const opacity = numeric(element.getAttribute('opacity'), fallback);
+			const fillOpacity = numeric(element.getAttribute('fill-opacity'), 1);
+			return clamp(opacity * fillOpacity, 0, 1);
+		};
+
+		const borderOpacityOf = (element: Element, fallback = 1) => {
+			const opacity = numeric(element.getAttribute('opacity'), fallback);
+			const strokeOpacity = numeric(element.getAttribute('stroke-opacity'), 1);
+			return clamp(opacity * strokeOpacity, 0, 1);
+		};
+
+		const buildVectorPdf = async () => {
+			const pdf = await PDFDocument.create();
+			const page = pdf.addPage([width, height]);
+			const font = await pdf.embedFont(StandardFonts.Helvetica);
+
+			const drawElement = (element: Element): void => {
+				const tag = element.tagName.toLowerCase();
+
+				if (tag === 'svg' || tag === 'g') {
+					for (const child of Array.from(element.children)) {
+						drawElement(child);
+					}
+					return;
+				}
+
+				if (tag === 'path') {
+					const d = element.getAttribute('d');
+
+					if (!d?.trim().length) {
+						return;
+					}
+
+					const color = toPdfColor(element.getAttribute('fill'));
+					const borderColor = toPdfColor(element.getAttribute('stroke'));
+
+					page.drawSvgPath(d, {
+						x: 0,
+						y: height,
+						...(color ? { color, opacity: opacityOf(element) } : {}),
+						...(borderColor
+							? {
+									borderColor,
+									borderOpacity: borderOpacityOf(element),
+									borderWidth: numeric(element.getAttribute('stroke-width'), 1)
+								}
+							: {})
+					});
+					return;
+				}
+
+				if (tag === 'circle') {
+					const radius = numeric(element.getAttribute('r'));
+
+					if (radius <= 0) {
+						return;
+					}
+
+					const color = toPdfColor(element.getAttribute('fill'));
+					const borderColor = toPdfColor(element.getAttribute('stroke'));
+
+					page.drawEllipse({
+						x: numeric(element.getAttribute('cx')),
+						y: height - numeric(element.getAttribute('cy')),
+						xScale: radius,
+						yScale: radius,
+						...(color ? { color, opacity: opacityOf(element) } : {}),
+						...(borderColor
+							? {
+									borderColor,
+									borderOpacity: borderOpacityOf(element),
+									borderWidth: numeric(element.getAttribute('stroke-width'), 1)
+								}
+							: {})
+					});
+					return;
+				}
+
+				if (tag === 'rect') {
+					const rectWidth = numeric(element.getAttribute('width'));
+					const rectHeight = numeric(element.getAttribute('height'));
+
+					if (rectWidth <= 0 || rectHeight <= 0) {
+						return;
+					}
+
+					const color = toPdfColor(element.getAttribute('fill'));
+					const borderColor = toPdfColor(element.getAttribute('stroke'));
+
+					page.drawRectangle({
+						x: numeric(element.getAttribute('x')),
+						y: height - numeric(element.getAttribute('y')) - rectHeight,
+						width: rectWidth,
+						height: rectHeight,
+						...(color ? { color, opacity: opacityOf(element) } : {}),
+						...(borderColor
+							? {
+									borderColor,
+									borderOpacity: borderOpacityOf(element),
+									borderWidth: numeric(element.getAttribute('stroke-width'), 1)
+								}
+							: {})
+					});
+					return;
+				}
+
+				if (tag === 'text') {
+					const content = element.textContent?.trim() ?? '';
+
+					if (!content.length) {
+						return;
+					}
+
+					const size = Math.max(6, numeric(element.getAttribute('font-size'), 12));
+					const color = toPdfColor(element.getAttribute('fill')) ?? rgb(0, 0, 0);
+					const textWidth = font.widthOfTextAtSize(content, size);
+					let x = numeric(element.getAttribute('x'));
+					const anchor = element.getAttribute('text-anchor');
+
+					if (anchor === 'middle') {
+						x -= textWidth / 2;
+					} else if (anchor === 'end') {
+						x -= textWidth;
+					}
+
+					page.drawText(content, {
+						x,
+						y: height - numeric(element.getAttribute('y')) - size,
+						size,
+						font,
+						color,
+						opacity: opacityOf(element)
+					});
+					return;
+				}
+
+				throw new Error(`Unsupported SVG element: ${tag}`);
+			};
+
+			for (const child of Array.from(document.documentElement.children)) {
+				drawElement(child);
+			}
+
+			return pdf;
+		};
+
+		try {
+			const pdf = await buildVectorPdf();
+			return await toPdfBlob(pdf);
+		} catch (error) {
+			console.warn('PDF: falling back to raster for unsupported SVG elements', error);
+			const png = await exportPNG(2);
+
+			if (!png) {
+				throw new Error('PNG fallback failed while generating the PDF export.', {
+					cause: error
+				});
+			}
+
+			const pdf = await PDFDocument.create();
+			const page = pdf.addPage([width, height]);
+			const image = await pdf.embedPng(await png.arrayBuffer());
+			page.drawImage(image, { x: 0, y: 0, width, height });
+			return await toPdfBlob(pdf);
+		}
 	}
 
 	function exportSnapshot(): GraphSnapshot {
@@ -1811,8 +3018,16 @@ export function createGraphState() {
 		}
 
 		graph.historyIndex -= 1;
-		await restoreSnapshot(history[graph.historyIndex]!);
-		lastHistoryJson = stringifySnapshot(history[graph.historyIndex]!);
+		const entry = history[graph.historyIndex];
+
+		if (!entry) {
+			return;
+		}
+
+		const hydrated = await hydrateHistoryEntry(entry);
+		await restoreSnapshot(hydrated.snapshot);
+		lastHistoryJson = hydrated.serialized;
+		scheduleHistoryCompression();
 	}
 
 	async function redoHistory(): Promise<void> {
@@ -1823,8 +3038,16 @@ export function createGraphState() {
 		}
 
 		graph.historyIndex += 1;
-		await restoreSnapshot(history[graph.historyIndex]!);
-		lastHistoryJson = stringifySnapshot(history[graph.historyIndex]!);
+		const entry = history[graph.historyIndex];
+
+		if (!entry) {
+			return;
+		}
+
+		const hydrated = await hydrateHistoryEntry(entry);
+		await restoreSnapshot(hydrated.snapshot);
+		lastHistoryJson = hydrated.serialized;
+		scheduleHistoryCompression();
 	}
 
 	function attachExporter(next: GraphExporter | null): void {
@@ -1833,7 +3056,12 @@ export function createGraphState() {
 
 	function destroy(): void {
 		clearPendingHistory();
+		clearPendingHistoryCompression();
 		clearPendingAnalysisInvalidation();
+		if (workerRestartTimer) {
+			clearTimeout(workerRestartTimer);
+			workerRestartTimer = null;
+		}
 		pendingAnalysisRequests.clear();
 		pendingIntersectionRequests.clear();
 		pendingFitRequests.clear();
@@ -1851,22 +3079,31 @@ export function createGraphState() {
 		}
 
 		syncVariables();
-		lastVariableSnapshot = [];
+		lastVariablesKey = '';
 		resetView(false);
 		commitHistory('bootstrap', 'initial');
 	}
 
 	syncVariables();
-	lastVariableSnapshot = [];
+	lastVariablesKey = '';
 	resetView(false);
 	commitHistory('bootstrap', 'initial');
 
 	return Object.assign(graph, {
+		backgroundImages,
 		addEquation,
 		removeEquation,
 		updateEquation,
 		duplicateEquation,
 		reorderEquations,
+		createFolder,
+		updateFolder,
+		deleteFolder,
+		reorderFolders,
+		addEquationToFolder,
+		removeEquationFromFolder,
+		getFolderForEquation,
+		isEquationEffectivelyVisible,
 		setViewportSize,
 		resetView,
 		zoomTo,
@@ -1882,6 +3119,14 @@ export function createGraphState() {
 		upsertRegressionResult,
 		clearRegressionResults,
 		addAnnotation,
+		addIntegralShading,
+		addTangentLine,
+		addConstrainedPoint,
+		updateConstrainedPoint,
+		removeConstrainedPoint,
+		addBackgroundImage,
+		updateBackgroundImage,
+		removeBackgroundImage,
 		setEquationRenderTime,
 		getCriticalPoints,
 		getIntersections,
@@ -1889,16 +3134,23 @@ export function createGraphState() {
 		hasEquationAnalysisFailure,
 		variableScope,
 		attachExporter,
+		requestRender,
 		destroy,
 		seedStarterEquations,
 		exportSnapshot,
 		exportPNG,
 		exportSVG,
+		exportPDF,
 		exportJSON,
 		importJSON,
 		shareURL,
+		commitHistoryNow,
 		undoHistory,
-		redoHistory
+		redoHistory,
+		removeIntegralShading,
+		removeTangentLine,
+		updateIntegralShading,
+		updateTangentLine
 	});
 }
 

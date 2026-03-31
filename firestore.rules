@@ -17,9 +17,14 @@ service cloud.firestore {
 			return data is map
 				&& data.schemaVersion == 1
 				&& data.ownerUid == request.auth.uid
+				&& data.isPublic is bool
 				&& data.name is string
 				&& data.name.size() > 0
 				&& data.name.size() <= 80;
+		}
+
+		function isPublicProject(userId, projectId) {
+			return get(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)).data.isPublic == true;
 		}
 
 		function validStateDoc() {
@@ -34,9 +39,13 @@ service cloud.firestore {
 				&& data.variables is list
 				&& data.regressionResults is list
 				&& data.annotations is list
+				&& (!('constrainedPoints' in data) || (data.constrainedPoints is list && data.constrainedPoints.size() <= 48))
+				&& (!('folders' in data) || (data.folders is list && data.folders.size() <= 24))
 				&& data.variables.size() <= 26
 				&& data.regressionResults.size() <= 24
-				&& data.annotations.size() <= 48;
+				&& data.annotations.size() <= 48
+				&& (!('tangentLines' in data) || (data.tangentLines is list && data.tangentLines.size() <= 48))
+				&& (!('integralShadings' in data) || (data.integralShadings is list && data.integralShadings.size() <= 48));
 		}
 
 		function validEquationDoc() {
@@ -49,6 +58,7 @@ service cloud.firestore {
 				&& data.raw is string
 				&& data.raw.size() > 0
 				&& data.raw.size() <= 512
+				&& (!('condition' in data) || data.condition == null || (data.condition is string && data.condition.size() <= 128))
 				&& data.kind is string
 				&& data.color is string
 				&& data.label is string
@@ -81,27 +91,29 @@ service cloud.firestore {
 		}
 
 		match /users/{userId} {
-			allow read, write: if false;
+			allow read: if isOwner(userId);
+			allow create, update: if isOwner(userId);
+			allow delete: if false;
 
 			match /projects/{projectId} {
-				allow read: if isOwner(userId);
+				allow read: if isOwner(userId) || resource.data.isPublic == true;
 				allow create, update: if isOwner(userId) && validProjectMeta();
 				allow delete: if isOwner(userId);
 
 				match /state/{stateId} {
-					allow read: if isOwner(userId);
+					allow read: if isOwner(userId) || isPublicProject(userId, projectId);
 					allow create, update: if isOwner(userId) && stateId == "main" && validStateDoc();
 					allow delete: if isOwner(userId);
 				}
 
 				match /equations/{equationId} {
-					allow read: if isOwner(userId);
+					allow read: if isOwner(userId) || isPublicProject(userId, projectId);
 					allow create, update: if isOwner(userId) && validEquationDoc();
 					allow delete: if isOwner(userId);
 				}
 
 				match /dataSeries/{seriesId} {
-					allow read: if isOwner(userId);
+					allow read: if isOwner(userId) || isPublicProject(userId, projectId);
 					allow create, update: if isOwner(userId) && validDataSeriesDoc();
 					allow delete: if isOwner(userId);
 				}

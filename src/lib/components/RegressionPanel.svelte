@@ -6,7 +6,9 @@
 	import type { GraphState } from '$stores/graph.svelte';
 	import type { UiState } from '$stores/ui.svelte';
 	import { getCachedKatex } from '$utils/katex-cache';
+	import { formatDisplay } from '$utils/format';
 	import { renderKatex } from '$utils/katexRenderer';
+	import { sanitizeMathHtml, sanitizePlainTextHtml } from '$utils/sanitize';
 
 	let { graph, ui } = $props<{ graph: GraphState; ui: UiState }>();
 
@@ -119,11 +121,13 @@
 		const cached = getCachedKatex(cacheKey);
 		const token = ++equationRenderToken;
 
-		equationHtml = cached ?? currentResult.equation;
+		equationHtml = cached
+			? sanitizeMathHtml(cached)
+			: sanitizePlainTextHtml(currentResult.equation);
 
 		void renderKatex(cacheKey, currentResult.latex, true, currentResult.equation).then((html) => {
 			if (token === equationRenderToken) {
-				equationHtml = html;
+				equationHtml = sanitizeMathHtml(html);
 			}
 		});
 	});
@@ -226,10 +230,10 @@
 			<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 			<div class="equation">{@html equationHtml}</div>
 			<div class={`badge ${badgeTone(currentResult.metrics.r2)}`}>
-				R² {currentResult.metrics.r2.toPrecision(4)}
+				R² {formatDisplay(currentResult.metrics.r2)}
 			</div>
-			<p>RMSE {currentResult.metrics.rmse.toPrecision(4)}</p>
-			<p>MAE {currentResult.metrics.mae.toPrecision(4)}</p>
+			<p>RMSE {formatDisplay(currentResult.metrics.rmse)}</p>
+			<p>MAE {formatDisplay(currentResult.metrics.mae)}</p>
 			<button type="button" class="fit" onclick={addToGraph}>Add to graph</button>
 		</section>
 	{/if}
@@ -251,7 +255,7 @@
 				{#each comparison as result (`${result.model}:${result.equation}`)}
 					<tr>
 						<td>{result.model}</td>
-						<td>{result.metrics.r2.toPrecision(4)}</td>
+						<td>{formatDisplay(result.metrics.r2)}</td>
 					</tr>
 				{/each}
 			</tbody>

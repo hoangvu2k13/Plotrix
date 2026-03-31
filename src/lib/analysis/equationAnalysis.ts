@@ -40,6 +40,9 @@ export interface EquationAnalysisInput {
 const DERIVATIVE_STEP = 1e-5;
 const DOMAIN_SAMPLE_COUNT = 240;
 const RANGE_SAMPLE_COUNT = 512;
+const MAX_SAMPLE_BUFFER = 2048;
+const RANGE_X_BUFFER = new Float64Array(MAX_SAMPLE_BUFFER);
+const RANGE_Y_BUFFER = new Float64Array(MAX_SAMPLE_BUFFER);
 
 function sampleRangeBuffers(
 	evaluate: (x: number) => number | null,
@@ -47,17 +50,19 @@ function sampleRangeBuffers(
 	xMax: number,
 	count: number
 ) {
-	const step = count > 1 ? (xMax - xMin) / (count - 1) : 0;
-	const xBuf = new Float64Array(count);
-	const yBuf = new Float64Array(count);
+	const size = Math.min(count, MAX_SAMPLE_BUFFER);
+	const step = size > 1 ? (xMax - xMin) / (size - 1) : 0;
 
-	for (let index = 0; index < count; index += 1) {
+	for (let index = 0; index < size; index += 1) {
 		const x = xMin + step * index;
-		xBuf[index] = x;
-		yBuf[index] = evaluate(x) ?? Number.NaN;
+		RANGE_X_BUFFER[index] = x;
+		RANGE_Y_BUFFER[index] = evaluate(x) ?? Number.NaN;
 	}
 
-	return { xBuf, yBuf };
+	return {
+		xBuf: RANGE_X_BUFFER.subarray(0, size),
+		yBuf: RANGE_Y_BUFFER.subarray(0, size)
+	};
 }
 
 function viewportBounds(viewport: EquationAnalysisInput['viewport']) {
@@ -120,8 +125,14 @@ function inferRange(
 		return 'undefined';
 	}
 
-	const min = Math.min(...samples);
-	const max = Math.max(...samples);
+	let min = Number.POSITIVE_INFINITY;
+	let max = Number.NEGATIVE_INFINITY;
+
+	for (let index = 0; index < samples.length; index += 1) {
+		const value = samples[index]!;
+		if (value < min) min = value;
+		if (value > max) max = value;
+	}
 
 	if (Math.abs(max) > 1e6 || Math.abs(min) > 1e6) {
 		return 'ℝ';
@@ -306,7 +317,16 @@ function detectHorizontalAsymptotes(evaluate: (x: number) => number | null) {
 		}
 
 		const tail = samples.slice(-3);
-		const spread = Math.max(...tail) - Math.min(...tail);
+		let tailMin = Number.POSITIVE_INFINITY;
+		let tailMax = Number.NEGATIVE_INFINITY;
+
+		for (let index = 0; index < tail.length; index += 1) {
+			const value = tail[index]!;
+			if (value < tailMin) tailMin = value;
+			if (value > tailMax) tailMax = value;
+		}
+
+		const spread = tailMax - tailMin;
 		return spread < 1e-3 ? tail[tail.length - 1]! : null;
 	};
 
@@ -375,7 +395,17 @@ function simpsonEstimate(a: number, b: number, fa: number, fm: number, fb: numbe
 	return ((b - a) / 6) * (fa + 4 * fm + fb);
 }
 
-function adaptiveSimpsonRecursive(
+type SimpsonInterval = {
+	a: number;
+	b: number;
+	depth: number;
+	fa: number;
+	fb: number;
+	fm: number;
+	whole: number;
+};
+
+function adaptiveSimpsonIterative(
 	evaluate: (x: number) => number | null,
 	a: number,
 	b: number,
@@ -385,58 +415,62 @@ function adaptiveSimpsonRecursive(
 	whole: number,
 	depth: number
 ): number | null {
-	const midpoint = (a + b) / 2;
-	const leftMidpoint = (a + midpoint) / 2;
-	const rightMidpoint = (midpoint + b) / 2;
-	const fLeftMidpoint = evaluate(leftMidpoint);
-	const fRightMidpoint = evaluate(rightMidpoint);
+	const stack: SimpsonInterval[] = [{ a, b, depth, fa, fb, fm, whole }];
+	let total = 0;
 
-	if (
-		fLeftMidpoint === null ||
-		fRightMidpoint === null ||
-		!Number.isFinite(fLeftMidpoint) ||
-		!Number.isFinite(fRightMidpoint)
-	) {
-		return null;
+	while (stack.length > 0) {
+		const interval = stack.pop()!;
+		const midpoint = (interval.a + interval.b) / 2;
+		const leftMidpoint = (interval.a + midpoint) / 2;
+		const rightMidpoint = (midpoint + interval.b) / 2;
+		const fLeftMidpoint = evaluate(leftMidpoint);
+		const fRightMidpoint = evaluate(rightMidpoint);
+
+		if (
+			fLeftMidpoint === null ||
+			fRightMidpoint === null ||
+			!Number.isFinite(fLeftMidpoint) ||
+			!Number.isFinite(fRightMidpoint)
+		) {
+			return null;
+		}
+
+		const left = simpsonEstimate(interval.a, midpoint, interval.fa, fLeftMidpoint, interval.fm);
+		const right = simpsonEstimate(midpoint, interval.b, interval.fm, fRightMidpoint, interval.fb);
+		const refined = left + right;
+
+		if (
+			interval.depth <= 0 ||
+			Math.abs(refined - interval.whole) < 1e-6 * Math.max(1, Math.abs(refined))
+		) {
+			total += refined + (refined - interval.whole) / 15;
+			continue;
+		}
+
+		stack.push({
+			a: midpoint,
+			b: interval.b,
+			depth: interval.depth - 1,
+			fa: interval.fm,
+			fb: interval.fb,
+			fm: fRightMidpoint,
+			whole: right
+		});
+		stack.push({
+			a: interval.a,
+			b: midpoint,
+			depth: interval.depth - 1,
+			fa: interval.fa,
+			fb: interval.fm,
+			fm: fLeftMidpoint,
+			whole: left
+		});
 	}
 
-	const left = simpsonEstimate(a, midpoint, fa, fLeftMidpoint, fm);
-	const right = simpsonEstimate(midpoint, b, fm, fRightMidpoint, fb);
-	const refined = left + right;
-
-	if (depth <= 0 || Math.abs(refined - whole) < 1e-6 * Math.max(1, Math.abs(refined))) {
-		return refined + (refined - whole) / 15;
-	}
-
-	const leftIntegral = adaptiveSimpsonRecursive(
-		evaluate,
-		a,
-		midpoint,
-		fa,
-		fLeftMidpoint,
-		fm,
-		left,
-		depth - 1
-	);
-	const rightIntegral = adaptiveSimpsonRecursive(
-		evaluate,
-		midpoint,
-		b,
-		fm,
-		fRightMidpoint,
-		fb,
-		right,
-		depth - 1
-	);
-
-	if (leftIntegral === null || rightIntegral === null) {
-		return null;
-	}
-
-	return leftIntegral + rightIntegral;
+	return total;
 }
 
-function adaptiveSimpsonIntegral(
+export function adaptiveSimpsonIntegral(
 	evaluate: (x: number) => number | null,
 	a: number,
 	b: number,
@@ -458,7 +492,7 @@ function adaptiveSimpsonIntegral(
 		return null;
 	}
 
-	return adaptiveSimpsonRecursive(
+	return adaptiveSimpsonIterative(
 		evaluate,
 		a,
 		b,
@@ -520,41 +554,11 @@ function integrateVisibleFiniteIntervals(
 	};
 }
 
-function symbolicPrimitive(
-	node: MathNode | null
-): { display: string; expression: string | null } | null {
-	const source = node?.toString() ?? '';
-
-	if (/^sin\(x\)$/.test(source)) {
-		return { display: '-cos(x) + C', expression: '-cos(x)' };
-	}
-
-	if (/^cos\(x\)$/.test(source)) {
-		return { display: 'sin(x) + C', expression: 'sin(x)' };
-	}
-
-	if (/^exp\(x\)$/.test(source) || /^e\^x$/.test(source)) {
-		return { display: 'exp(x) + C', expression: 'exp(x)' };
-	}
-
-	if (/^x$/.test(source)) {
-		return { display: '(x^2) / 2 + C', expression: '(x^2) / 2' };
-	}
-
-	return null;
-}
-
 function integralSummary(input: EquationAnalysisInput): {
 	display: string;
 	expression: string | null;
 } {
 	const { xMin, xMax } = viewportBounds(input.viewport);
-	const symbolic = symbolicPrimitive(input.node);
-
-	if (symbolic) {
-		return symbolic;
-	}
-
 	const area = integrateVisibleFiniteIntervals(input.evaluate, xMin, xMax);
 
 	if (!area) {

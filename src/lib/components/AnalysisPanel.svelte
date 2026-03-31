@@ -3,14 +3,21 @@
 	import { fade } from 'svelte/transition';
 
 	import Icon from '$components/Icon.svelte';
-	import { equationToLatex, type EquationAnalysis } from '$lib/analysis/equationAnalysis';
+	import Toggle from '$components/Toggle.svelte';
+	import {
+		adaptiveSimpsonIntegral,
+		equationToLatex,
+		type EquationAnalysis
+	} from '$lib/analysis/equationAnalysis';
 	import { evaluateCartesianAt } from '$lib/math/engine';
 	import type { GraphState } from '$stores/graph.svelte';
 	import type { UiState } from '$stores/ui.svelte';
 	import { getCachedKatex } from '$utils/katex-cache';
 	import { copyText } from '$utils/download';
 	import { renderKatex } from '$utils/katexRenderer';
-	import { clamp, formatCoordinate } from '$utils/format';
+	import { clamp, formatCoordinate, formatDisplay } from '$utils/format';
+	import { sanitizeMathHtml, sanitizePlainTextHtml } from '$utils/sanitize';
+	import '../../styles/components/analysis-panel.css';
 
 	let { graph, ui } = $props<{ graph: GraphState; ui: UiState }>();
 
@@ -32,6 +39,10 @@
 		end: '10',
 		step: '1'
 	});
+	let probabilityBounds = $state({
+		lower: '-inf',
+		upper: '+inf'
+	});
 	let sections = $state({
 		domain: true,
 		zeros: true,
@@ -39,8 +50,11 @@
 		symmetry: true,
 		asymptotes: true,
 		critical: true,
+		points: true,
 		derivative: true,
+		tangents: true,
 		integral: true,
+		probability: true,
 		behavior: true
 	});
 
@@ -67,6 +81,34 @@
 			0,
 			showAllCriticalPoints ? undefined : MAX_CRITICAL_POINTS_VISIBLE
 		)
+	);
+	const viewportCenterX = $derived(
+		(graph.viewport.width / 2 - graph.view.originX) / Math.max(graph.view.scaleX, 1e-6)
+	);
+	const visibleXSpan = $derived(graph.viewport.width / Math.max(graph.view.scaleX, 1e-6));
+	const equationTangentLines = $derived.by(() =>
+		equation
+			? graph.tangentLines.filter(
+					(entry: GraphState['tangentLines'][number]) => entry.equationId === equation.id
+				)
+			: []
+	);
+	const equationIntegralShadings = $derived.by(() =>
+		equation
+			? graph.integralShadings.filter(
+					(entry: GraphState['integralShadings'][number]) => entry.equationId === equation.id
+				)
+			: []
+	);
+	const equationConstrainedPoints = $derived.by(() =>
+		equation
+			? graph.constrainedPoints.filter(
+					(entry: GraphState['constrainedPoints'][number]) => entry.equationId === equation.id
+				)
+			: []
+	);
+	const isDistributionEquation = $derived.by(() =>
+		Boolean(equation?.raw.match(/(normalPDF|normalCDF|binomialPDF|poissonPDF|tPDF|chiSquaredPDF)/))
 	);
 
 	function summarizeText(value: string, expanded: boolean): string {
@@ -95,13 +137,19 @@
 		showAllAsymptotes = false;
 		showAllCriticalPoints = false;
 
-		loading = true;
-		errorMessage = null;
-		report = graph.getEquationAnalysis(target.id);
-		loading = report === null && !graph.hasEquationAnalysisFailure(target.id);
-		if (!loading && report === null) {
-			errorMessage =
-				'Analysis is available only for Cartesian equations with finite sampled values.';
+		const next = graph.getEquationAnalysis(target.id);
+		const failed = graph.hasEquationAnalysisFailure(target.id);
+
+		if (next) {
+			report = next;
+			loading = false;
+			errorMessage = null;
+		} else if (failed) {
+			loading = false;
+			errorMessage = 'Plotrix could not build an analysis report for this equation.';
+		} else {
+			loading = true;
+			errorMessage = null;
 		}
 	});
 
@@ -145,36 +193,40 @@
 	});
 
 	$effect(() => {
-		if (!equation) return;
-		const next = graph.getEquationAnalysis(equation.id);
-		if (next) {
-			report = next;
-			loading = false;
-			errorMessage = null;
-		} else if (graph.hasEquationAnalysisFailure(equation.id)) {
-			loading = false;
-			errorMessage = 'Plotrix could not build an analysis report for this equation.';
-		}
-	});
-
-	$effect(() => {
 		if (!equation) {
 			equationHtml = '';
 			return;
 		}
 
-		const latex = equationToLatex(equation.compiled);
+		const latex = equation.compiled ? equationToLatex(equation.compiled) : equation.raw;
 		const cacheKey = `${equation.kind}:${equation.raw}:display`;
 		const cached = getCachedKatex(cacheKey);
 		const token = ++equationRenderToken;
 
-		equationHtml = cached ?? equation.raw;
+		equationHtml = cached ? sanitizeMathHtml(cached) : sanitizePlainTextHtml(equation.raw);
 
 		void renderKatex(cacheKey, latex, true, equation.raw).then((html) => {
 			if (token === equationRenderToken) {
-				equationHtml = html;
+				equationHtml = sanitizeMathHtml(html);
 			}
 		});
+	});
+
+	$effect(() => {
+		if (!equation || !ui.activeConstrainedPointId) {
+			return;
+		}
+
+		const target = graph.constrainedPoints.find(
+			(entry: GraphState['constrainedPoints'][number]) => entry.id === ui.activeConstrainedPointId
+		);
+
+		if (target?.equationId === equation.id) {
+			sections = {
+				...sections,
+				points: true
+			};
+		}
 	});
 
 	$effect(() => {
@@ -216,14 +268,181 @@
 		});
 	}
 
+	function addTangentLine(): void {
+		if (!equation) {
+			return;
+		}
+
+		const tangent = graph.addTangentLine(equation.id, viewportCenterX);
+
+		if (!tangent) {
+			return;
+		}
+
+		ui.pushToast({
+			title: 'Tangent line added',
+			description: 'A tangent line was added at the center of the current viewport.',
+			tone: 'success'
+		});
+	}
+
+	function addConstrainedPoint(): void {
+		if (!equation) {
+			return;
+		}
+
+		const point = graph.addConstrainedPoint(equation.id, viewportCenterX);
+
+		if (!point) {
+			return;
+		}
+
+		ui.setActiveConstrainedPointId(point.id);
+	}
+
+	function addIntegralShading(): void {
+		if (!equation) {
+			return;
+		}
+
+		const center = viewportCenterX;
+		const halfWidth = Math.max(visibleXSpan / 8, 0.5);
+		const shading = graph.addIntegralShading(equation.id, center - halfWidth, center + halfWidth);
+
+		if (!shading) {
+			return;
+		}
+
+		ui.pushToast({
+			title: 'Integral shading added',
+			description: 'A shaded integral region was added for the current equation.',
+			tone: 'success'
+		});
+	}
+
+	function parseProbabilityBound(value: string, fallback: number): number {
+		const trimmed = value.trim().toLowerCase();
+
+		if (trimmed === '-inf' || trimmed === '-infinity') {
+			return Number.NEGATIVE_INFINITY;
+		}
+
+		if (
+			trimmed === '+inf' ||
+			trimmed === 'inf' ||
+			trimmed === '+infinity' ||
+			trimmed === 'infinity'
+		) {
+			return Number.POSITIVE_INFINITY;
+		}
+
+		const numeric = Number(trimmed);
+		return Number.isFinite(numeric) ? numeric : fallback;
+	}
+
+	function finiteDistributionBounds(lower: number, upper: number): [number, number] {
+		if (Number.isFinite(lower) && Number.isFinite(upper)) {
+			return [lower, upper];
+		}
+
+		if (!Number.isFinite(lower) && !Number.isFinite(upper)) {
+			return [-32, 32];
+		}
+
+		if (!Number.isFinite(lower)) {
+			return [upper - 32, upper];
+		}
+
+		return [lower, lower + 32];
+	}
+
+	function isDiscreteDistribution(raw: string): boolean {
+		return /binomialPDF|poissonPDF/.test(raw);
+	}
+
+	function calculateProbabilityShading(): void {
+		if (!equation || !equation.compiledExpression) {
+			return;
+		}
+
+		const lower = parseProbabilityBound(probabilityBounds.lower, Number.NEGATIVE_INFINITY);
+		const upper = parseProbabilityBound(probabilityBounds.upper, Number.POSITIVE_INFINITY);
+		const scope = graph.variableScope();
+
+		if (isDiscreteDistribution(equation.raw)) {
+			const start = Number.isFinite(lower) ? Math.ceil(lower) : 0;
+			const hardEnd = Number.isFinite(upper) ? Math.floor(upper) : 1024;
+			let total = 0;
+			let misses = 0;
+
+			for (let k = start; k <= hardEnd; k += 1) {
+				const value = evaluateCartesianAt(equation.compiledExpression, k, scope);
+
+				if (value === null || !Number.isFinite(value)) {
+					misses += 1;
+					if (!Number.isFinite(upper) && misses > 16) {
+						break;
+					}
+					continue;
+				}
+
+				misses = 0;
+				total += value;
+			}
+
+			const shading = graph.addIntegralShading(
+				equation.id,
+				Number.isFinite(lower) ? lower : start,
+				Number.isFinite(upper) ? upper : Math.max(start, hardEnd)
+			);
+
+			if (shading) {
+				graph.updateIntegralShading(shading.id, {
+					label: `${(total * 100).toFixed(2)}%`,
+					percentage: true
+				});
+			}
+
+			ui.pushToast({
+				title: 'Probability shaded',
+				description: `P = ${(total * 100).toFixed(2)}%.`,
+				tone: 'success'
+			});
+			return;
+		}
+
+		const [finiteLower, finiteUpper] = finiteDistributionBounds(lower, upper);
+		const probability =
+			adaptiveSimpsonIntegral(
+				(value) => evaluateCartesianAt(equation.compiledExpression, value, scope),
+				finiteLower,
+				finiteUpper,
+				8
+			) ?? 0;
+		const shading = graph.addIntegralShading(equation.id, finiteLower, finiteUpper);
+
+		if (shading) {
+			graph.updateIntegralShading(shading.id, {
+				label: `${(probability * 100).toFixed(2)}%`,
+				percentage: true
+			});
+		}
+
+		ui.pushToast({
+			title: 'Probability shaded',
+			description: `P = ${(probability * 100).toFixed(2)}%.`,
+			tone: 'success'
+		});
+	}
+
 	async function copyReport(): Promise<void> {
 		if (!equation || !report) return;
 		const text = [
 			`Analysis Report: ${equation.raw}`,
 			`Domain: ${report.domain}`,
 			`Range: ${report.range}`,
-			`Zeros: ${report.zeros.map((value) => value.toPrecision(3)).join(', ') || 'None'}`,
-			`Period: ${report.period ? report.period.toPrecision(3) : 'None'}`,
+			`Zeros: ${report.zeros.map((value) => formatDisplay(value)).join(', ') || 'None'}`,
+			`Period: ${report.period ? formatDisplay(report.period) : 'None'}`,
 			`Derivative: ${report.derivative}`,
 			`Integral: ${report.integral}`,
 			`Curvature: ${report.curvature}`
@@ -330,8 +549,13 @@
 					</button>
 				</div>
 			</header>
+			{#if equation.condition}
+				<div class="pills">
+					<span class="pill">Conditional: {equation.condition}</span>
+				</div>
+			{/if}
 
-			{#if loading}
+			{#if loading && !report}
 				<div class="loading">
 					<div></div>
 					<div></div>
@@ -341,7 +565,12 @@
 			{:else if errorMessage || !report}
 				<p class="muted">{errorMessage ?? 'Analysis is unavailable for this equation.'}</p>
 			{:else}
-				<div class="sections">
+				<div class="sections analysis-sections-shell">
+					{#if loading}
+						<div class="analysis-updating" aria-label="Updating analysis...">
+							<div class="analysis-updating-spinner"></div>
+						</div>
+					{/if}
 					{#if report.partial}
 						<p class="partial-note">
 							Showing critical points first while the full report finishes.
@@ -357,7 +586,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.domain ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.domain ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.domain}
@@ -402,7 +631,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.zeros ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.zeros ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.zeros}
@@ -410,7 +639,7 @@
 								{#if visibleZeros.length}
 									{#each visibleZeros as zero (`${zero}`)}
 										<button type="button" class="pill" onclick={() => focusPoint(zero, 0)}
-											>x = {zero.toPrecision(3)}</button
+											>x = {formatDisplay(zero)}</button
 										>
 									{/each}
 									{#if report.zeros.length > MAX_PILLS_VISIBLE}
@@ -441,7 +670,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.values ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.values ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.values}
@@ -519,7 +748,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.symmetry ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.symmetry ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.symmetry}
@@ -531,7 +760,7 @@
 								</div>
 								<div>
 									<strong>Period</strong><span
-										>{report.period ? `T = ${report.period.toPrecision(3)}` : 'None detected'}</span
+										>{report.period ? `T = ${formatDisplay(report.period)}` : 'None detected'}</span
 									>
 								</div>
 							</div>
@@ -548,7 +777,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.asymptotes ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.asymptotes ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.asymptotes}
@@ -564,7 +793,7 @@
 											onmouseleave={() => ui.setHighlightedAsymptotes([])}
 											onblur={() => ui.setHighlightedAsymptotes([])}
 										>
-											x = {value.toPrecision(4)}
+											x = {formatDisplay(value)}
 										</button>
 									{/each}
 									{#if report.verticalAsymptotes.length > MAX_ASYMPTOTES_VISIBLE}
@@ -585,7 +814,7 @@
 							<p class="muted">
 								{report.horizontalAsymptotes.left !== null ||
 								report.horizontalAsymptotes.right !== null
-									? `y → ${report.horizontalAsymptotes.left?.toPrecision(3) ?? 'none'} as x → -∞ · y → ${report.horizontalAsymptotes.right?.toPrecision(3) ?? 'none'} as x → +∞`
+									? `y → ${report.horizontalAsymptotes.left === null ? 'none' : formatDisplay(report.horizontalAsymptotes.left)} as x → -∞ · y → ${report.horizontalAsymptotes.right === null ? 'none' : formatDisplay(report.horizontalAsymptotes.right)} as x → +∞`
 									: 'None'}
 							</p>
 						{/if}
@@ -601,7 +830,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.critical ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.critical ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.critical}
@@ -620,8 +849,8 @@
 														onclick={() => focusPoint(point.x, point.y)}>{point.kind}</button
 													></td
 												>
-												<td>{point.x.toPrecision(3)}</td>
-												<td>{point.y.toPrecision(3)}</td>
+												<td>{formatDisplay(point.x)}</td>
+												<td>{formatDisplay(point.y)}</td>
 											</tr>
 										{/each}
 									</tbody>
@@ -640,6 +869,77 @@
 							{:else}
 								<p class="muted">No critical points were detected in the current viewport.</p>
 							{/if}
+							<button type="button" class="pill" onclick={addConstrainedPoint}>Add point</button>
+						{/if}
+					</section>
+
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.points = !sections.points)}
+						>
+							<span>Constrained Points</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={sections.points ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
+							/>
+						</button>
+						{#if sections.points}
+							{#if equationConstrainedPoints.length}
+								<table class="table">
+									<thead>
+										<tr><th>x</th><th>Label</th><th>Coords</th><th>Remove</th></tr>
+									</thead>
+									<tbody>
+										{#each equationConstrainedPoints as point (point.id)}
+											<tr>
+												<td>
+													<input
+														type="number"
+														value={point.x}
+														onchange={(event) =>
+															graph.updateConstrainedPoint(point.id, {
+																x: Number((event.currentTarget as HTMLInputElement).value)
+															})}
+													/>
+												</td>
+												<td>
+													<input
+														type="text"
+														value={point.label}
+														placeholder="Point label"
+														oninput={(event) =>
+															graph.updateConstrainedPoint(point.id, {
+																label: (event.currentTarget as HTMLInputElement).value
+															})}
+													/>
+												</td>
+												<td>
+													<Toggle
+														checked={point.showCoordinates}
+														label="Show point coordinates"
+														onChange={(showCoordinates) =>
+															graph.updateConstrainedPoint(point.id, { showCoordinates })}
+													/>
+												</td>
+												<td>
+													<button
+														type="button"
+														class="table-button"
+														onclick={() => graph.removeConstrainedPoint(point.id)}
+													>
+														Remove
+													</button>
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							{:else}
+								<p class="muted">No constrained points are attached to this equation yet.</p>
+							{/if}
 						{/if}
 					</section>
 
@@ -653,7 +953,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.derivative ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.derivative ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.derivative}
@@ -666,6 +966,65 @@
 										addAnalysisEquation(report?.derivativeExpression ?? equation.raw, 'Derivative')}
 									>Add derivative to graph</button
 								>
+							{/if}
+							<button type="button" class="pill" onclick={addTangentLine}>Add tangent line</button>
+						{/if}
+					</section>
+
+					<section>
+						<button
+							type="button"
+							class="accordion"
+							onclick={() => (sections.tangents = !sections.tangents)}
+						>
+							<span>Tangent Lines</span>
+							<Icon
+								icon={ChevronDown}
+								size="var(--icon-md)"
+								class={sections.tangents ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
+							/>
+						</button>
+						{#if sections.tangents}
+							{#if equationTangentLines.length}
+								<table class="table">
+									<thead>
+										<tr><th>Visible</th><th>x</th><th>Remove</th></tr>
+									</thead>
+									<tbody>
+										{#each equationTangentLines as tangent (tangent.id)}
+											<tr>
+												<td>
+													<Toggle
+														checked={tangent.visible}
+														label="Toggle tangent line visibility"
+														onChange={(visible) => graph.updateTangentLine(tangent.id, { visible })}
+													/>
+												</td>
+												<td>
+													<input
+														type="number"
+														value={tangent.x}
+														onchange={(event) =>
+															graph.updateTangentLine(tangent.id, {
+																x: Number((event.currentTarget as HTMLInputElement).value)
+															})}
+													/>
+												</td>
+												<td>
+													<button
+														type="button"
+														class="table-button"
+														onclick={() => graph.removeTangentLine(tangent.id)}
+													>
+														Remove
+													</button>
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							{:else}
+								<p class="muted">No tangent lines are attached to this equation yet.</p>
 							{/if}
 						{/if}
 					</section>
@@ -680,7 +1039,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.integral ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.integral ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.integral}
@@ -696,8 +1055,103 @@
 										)}>Add antiderivative to graph</button
 								>
 							{/if}
+							<button type="button" class="pill" onclick={addIntegralShading}>Add shading</button>
+							{#if equationIntegralShadings.length}
+								<table class="table">
+									<thead>
+										<tr
+											><th>Visible</th><th>x min</th><th>x max</th><th>Value</th><th>Remove</th></tr
+										>
+									</thead>
+									<tbody>
+										{#each equationIntegralShadings as shading (shading.id)}
+											<tr>
+												<td>
+													<Toggle
+														checked={shading.visible}
+														label="Toggle shading visibility"
+														onChange={(visible) =>
+															graph.updateIntegralShading(shading.id, { visible })}
+													/>
+												</td>
+												<td>
+													<input
+														type="number"
+														value={shading.xMin}
+														onchange={(event) =>
+															graph.updateIntegralShading(shading.id, {
+																xMin: Number((event.currentTarget as HTMLInputElement).value)
+															})}
+													/>
+												</td>
+												<td>
+													<input
+														type="number"
+														value={shading.xMax}
+														onchange={(event) =>
+															graph.updateIntegralShading(shading.id, {
+																xMax: Number((event.currentTarget as HTMLInputElement).value)
+															})}
+													/>
+												</td>
+												<td>
+													<Toggle
+														checked={shading.showValue}
+														label="Toggle integral value label"
+														onChange={(showValue) =>
+															graph.updateIntegralShading(shading.id, { showValue })}
+													/>
+												</td>
+												<td>
+													<button
+														type="button"
+														class="table-button"
+														onclick={() => graph.removeIntegralShading(shading.id)}
+													>
+														Remove
+													</button>
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							{:else}
+								<p class="muted">No integral shadings are attached to this equation yet.</p>
+							{/if}
 						{/if}
 					</section>
+
+					{#if isDistributionEquation}
+						<section>
+							<button
+								type="button"
+								class="accordion"
+								onclick={() => (sections.probability = !sections.probability)}
+							>
+								<span>Shade Probability</span>
+								<Icon
+									icon={ChevronDown}
+									size="var(--icon-md)"
+									class={sections.probability ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
+								/>
+							</button>
+							{#if sections.probability}
+								<div class="values-controls">
+									<label>
+										<span>Lower</span>
+										<input type="text" bind:value={probabilityBounds.lower} />
+									</label>
+									<label>
+										<span>Upper</span>
+										<input type="text" bind:value={probabilityBounds.upper} />
+									</label>
+								</div>
+								<button type="button" class="pill" onclick={calculateProbabilityShading}>
+									Calculate P(a ≤ X ≤ b)
+								</button>
+							{/if}
+						</section>
+					{/if}
 
 					<section>
 						<button
@@ -709,7 +1163,7 @@
 							<Icon
 								icon={ChevronDown}
 								size="var(--icon-md)"
-								class={!sections.behavior ? 'accordion-icon chevron-rotated' : 'accordion-icon'}
+								class={sections.behavior ? 'accordion-icon' : 'accordion-icon chevron-rotated'}
 							/>
 						</button>
 						{#if sections.behavior}

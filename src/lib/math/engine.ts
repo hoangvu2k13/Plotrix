@@ -4,6 +4,115 @@ import { LruMap } from '$lib/utils/lru';
 
 const math = create(all!, {});
 
+const LANCZOS_COEFFICIENTS = [
+	0.9999999999998099, 676.5203681218851, -1259.1392167224028, 771.3234287776531, -176.6150291621406,
+	12.507343278686905, -0.13857109526572012, 9.984369578019572e-6, 1.5056327351493116e-7
+];
+const HALF_LOG_TWO_PI = 0.9189385332046727;
+
+function logGamma(value: number): number {
+	if (!Number.isFinite(value) || value <= 0) {
+		return Number.NaN;
+	}
+
+	if (value < 0.5) {
+		return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * value)) - logGamma(1 - value);
+	}
+
+	const adjusted = value - 1;
+	let series = LANCZOS_COEFFICIENTS[0]!;
+
+	for (let index = 1; index < LANCZOS_COEFFICIENTS.length; index += 1) {
+		series += LANCZOS_COEFFICIENTS[index]! / (adjusted + index);
+	}
+
+	const t = adjusted + LANCZOS_COEFFICIENTS.length - 1.5;
+	return HALF_LOG_TWO_PI + (adjusted + 0.5) * Math.log(t) - t + Math.log(series);
+}
+
+function erfApproximation(value: number): number {
+	const sign = Math.sign(value) || 1;
+	const x = Math.abs(value);
+	const t = 1 / (1 + 0.3275911 * x);
+	const polynomial =
+		((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+	return sign * (1 - polynomial * Math.exp(-(x * x)));
+}
+
+function normalPdf(x: number, mu = 0, sigma = 1): number {
+	if (!Number.isFinite(x) || !Number.isFinite(mu) || !Number.isFinite(sigma) || sigma <= 0) {
+		return Number.NaN;
+	}
+
+	const z = (x - mu) / sigma;
+	return Math.exp(-0.5 * z * z) / (sigma * Math.sqrt(2 * Math.PI));
+}
+
+function normalCdf(x: number, mu = 0, sigma = 1): number {
+	if (!Number.isFinite(x) || !Number.isFinite(mu) || !Number.isFinite(sigma) || sigma <= 0) {
+		return Number.NaN;
+	}
+
+	return 0.5 * (1 + erfApproximation((x - mu) / (sigma * Math.SQRT2)));
+}
+
+function binomialPdf(k: number, n: number, p: number): number {
+	if (
+		!Number.isInteger(k) ||
+		!Number.isInteger(n) ||
+		n < 0 ||
+		k < 0 ||
+		k > n ||
+		!Number.isFinite(p) ||
+		p <= 0 ||
+		p >= 1
+	) {
+		return Number.NaN;
+	}
+
+	const logProbability =
+		logGamma(n + 1) -
+		logGamma(k + 1) -
+		logGamma(n - k + 1) +
+		k * Math.log(p) +
+		(n - k) * Math.log(1 - p);
+	return Math.exp(logProbability);
+}
+
+function poissonPdf(k: number, lambda: number): number {
+	if (!Number.isInteger(k) || k < 0 || !Number.isFinite(lambda) || lambda <= 0) {
+		return Number.NaN;
+	}
+
+	return Math.exp(k * Math.log(lambda) - lambda - logGamma(k + 1));
+}
+
+function tPdf(x: number, df: number): number {
+	if (!Number.isFinite(x) || !Number.isFinite(df) || df <= 0) {
+		return Number.NaN;
+	}
+
+	const numerator = Math.exp(logGamma((df + 1) / 2) - logGamma(df / 2));
+	const denominator = Math.sqrt(df * Math.PI);
+	return (numerator / denominator) * (1 + (x * x) / df) ** (-(df + 1) / 2);
+}
+
+function chiSquaredPdf(x: number, df: number): number {
+	if (!Number.isFinite(x) || x < 0 || !Number.isFinite(df) || df <= 0) {
+		return Number.NaN;
+	}
+
+	if (x === 0) {
+		if (df === 2) {
+			return 0.5;
+		}
+
+		return df < 2 ? Number.POSITIVE_INFINITY : 0;
+	}
+
+	return Math.exp((df / 2 - 1) * Math.log(x) - x / 2 - (df / 2) * Math.log(2) - logGamma(df / 2));
+}
+
 math.import(
 	{
 		sec: (x: number) => 1 / Math.cos(x),
@@ -23,7 +132,13 @@ math.import(
 		dirac: (x: number) => (x === 0 ? Number.POSITIVE_INFINITY : 0),
 		factorial: (value: number) => math.factorial(value),
 		gamma: (value: number) => math.gamma(value),
-		Γ: (value: number) => math.gamma(value)
+		Γ: (value: number) => math.gamma(value),
+		normalPDF: normalPdf,
+		normalCDF: normalCdf,
+		binomialPDF: binomialPdf,
+		poissonPDF: poissonPdf,
+		tPDF: tPdf,
+		chiSquaredPDF: chiSquaredPdf
 	},
 	{ override: true, silent: true }
 );
@@ -34,6 +149,12 @@ const FUNCTION_TOKENS = [
 	'arccot',
 	'heaviside',
 	'factorial',
+	'normalPDF',
+	'normalCDF',
+	'binomialPDF',
+	'poissonPDF',
+	'tPDF',
+	'chiSquaredPDF',
 	'gamma',
 	'asinh',
 	'acosh',
@@ -68,9 +189,8 @@ export interface EvalFunction {
 	evaluate(scope: Record<string, number> | Map<string, number>): unknown;
 }
 
-const compileCache = new WeakMap<MathNode, EvalFunction>();
-const nativeCompileCache = new LruMap<string, EvalFunction>(200);
-const SAFE_EXPRESSION_CHARS = /^[0-9a-zA-Z\s+\-*/^().,_=<>!;πθΓ|]+$/;
+const nativeCompileCache = new LruMap<string, EvalFunction>(1000);
+const SAFE_EXPRESSION_CHARS = /^[0-9a-zA-Z\s+\-*/^().,_=<>!;:{}πθΓ|]+$/;
 const BLOCKED_EXPRESSION_KEYWORDS =
 	/\b(?:import|require|fetch|document|window|eval|Function|prototype|__proto__|constructor|globalThis)\b/i;
 const DISALLOWED_NODE_TYPES = new Set([
@@ -86,8 +206,16 @@ const DISALLOWED_NODE_TYPES = new Set([
 ]);
 const SAFE_SCOPE_KEY = /^[A-Za-z][A-Za-z0-9_]*$/;
 const BLOCKED_SCOPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const SAFE_SCOPE_MAP = new Map<string, number>();
 
-export type EquationKind = 'cartesian' | 'polar' | 'parametric' | 'implicit' | 'inequality';
+export type EquationKind =
+	| 'cartesian'
+	| 'polar'
+	| 'parametric'
+	| 'implicit'
+	| 'inequality'
+	| 'slopefield'
+	| 'vectorfield';
 export type ExpressionSource = EvalFunction | MathNode | null;
 
 export interface ParametricNodes {
@@ -128,6 +256,19 @@ export interface EquationSamplerInput {
 	kind: EquationKind;
 	paramRange: [number, number];
 	parametricNodes: ParametricNodes | null;
+}
+
+interface PiecewiseConditionClause {
+	inequality: InequalityNodes;
+	normalized: string;
+}
+
+interface PiecewiseBranch {
+	conditions: PiecewiseConditionClause[];
+	conditionSource: string;
+	expressionNode: MathNode;
+	expressionCompiled: EvalFunction;
+	expressionRaw: string;
 }
 
 function isNumberToken(token: string): boolean {
@@ -238,6 +379,10 @@ function stripPrefix(raw: string, kind: EquationKind): string {
 		return trimmed.replace(/^(?:r|θ)\s*=\s*/i, '');
 	}
 
+	if (kind === 'slopefield' && /^dy\/dx\s*=/.test(trimmed)) {
+		return trimmed.replace(/^dy\/dx\s*=\s*/i, '');
+	}
+
 	return trimmed;
 }
 
@@ -254,14 +399,19 @@ function compileNode(source: ExpressionSource): EvalFunction | null {
 	}
 
 	const node = source as MathNode;
-	const cached = compileCache.get(node);
+	const cacheKey = node.toString();
+	const cached = nativeCompileCache.get(cacheKey);
 
 	if (cached) {
 		return cached;
 	}
 
-	const compiled = node.compile();
-	compileCache.set(node, compiled);
+	if (!isSafeMathNode(node)) {
+		throw new Error('Expression contains unsupported syntax.');
+	}
+
+	const compiled = node.compile() as EvalFunction;
+	nativeCompileCache.set(cacheKey, compiled);
 	return compiled;
 }
 
@@ -367,17 +517,17 @@ function safeEvaluateCompiled(
 }
 
 function toSafeScope(scope: Record<string, number>): Map<string, number> {
-	const safeScope = new Map<string, number>();
+	SAFE_SCOPE_MAP.clear();
 
 	for (const [key, value] of Object.entries(scope)) {
 		if (!SAFE_SCOPE_KEY.test(key) || BLOCKED_SCOPE_KEYS.has(key) || !Number.isFinite(value)) {
 			continue;
 		}
 
-		safeScope.set(key, value);
+		SAFE_SCOPE_MAP.set(key, value);
 	}
 
-	return safeScope;
+	return SAFE_SCOPE_MAP;
 }
 
 function evaluateWithVariable(
@@ -568,6 +718,92 @@ function parseNode(source: string): { node: MathNode | null; error: string | nul
 			error: error instanceof Error ? error.message : 'Unable to parse expression.'
 		};
 	}
+}
+
+function splitTopLevel(source: string, separator: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let start = 0;
+
+	for (let index = 0; index < source.length; index += 1) {
+		const character = source[index];
+
+		if (character === '(' || character === '{') {
+			depth += 1;
+			continue;
+		}
+
+		if (character === ')' || character === '}') {
+			depth = Math.max(0, depth - 1);
+			continue;
+		}
+
+		if (depth === 0 && character === separator) {
+			parts.push(source.slice(start, index).trim());
+			start = index + 1;
+		}
+	}
+
+	parts.push(source.slice(start).trim());
+	return parts.filter((entry) => entry.length > 0);
+}
+
+function splitTopLevelOnce(source: string, separator: string): [string, string] | null {
+	let depth = 0;
+
+	for (let index = 0; index < source.length; index += 1) {
+		const character = source[index];
+
+		if (character === '(' || character === '{') {
+			depth += 1;
+			continue;
+		}
+
+		if (character === ')' || character === '}') {
+			depth = Math.max(0, depth - 1);
+			continue;
+		}
+
+		if (depth === 0 && character === separator) {
+			return [source.slice(0, index).trim(), source.slice(index + 1).trim()];
+		}
+	}
+
+	return null;
+}
+
+function splitPiecewiseConditions(source: string): string[] {
+	const clauses: string[] = [];
+	let depth = 0;
+	let start = 0;
+
+	for (let index = 0; index < source.length; index += 1) {
+		const character = source[index];
+
+		if (character === '(') {
+			depth += 1;
+			continue;
+		}
+
+		if (character === ')') {
+			depth = Math.max(0, depth - 1);
+			continue;
+		}
+
+		if (
+			depth === 0 &&
+			source.slice(index, index + 3).toLowerCase() === 'and' &&
+			(index === 0 || /\s/.test(source[index - 1] ?? '')) &&
+			(index + 3 >= source.length || /\s/.test(source[index + 3] ?? ''))
+		) {
+			clauses.push(source.slice(start, index).trim());
+			start = index + 3;
+			index += 2;
+		}
+	}
+
+	clauses.push(source.slice(start).trim());
+	return clauses.filter((entry) => entry.length > 0);
 }
 
 function validateIdentifiers(tokens: string[]): string | null {
@@ -804,6 +1040,192 @@ function parseInequality(raw: string): ParsedEquationResult {
 	};
 }
 
+function matchesInequality(
+	inequality: InequalityNodes,
+	scope: Record<string, number> | Map<string, number>
+): boolean {
+	const normalizedScope = scope instanceof Map ? Object.fromEntries(scope.entries()) : { ...scope };
+	const left = safeEvaluateCompiled(inequality.lhsCompiled, normalizedScope);
+	const right = safeEvaluateCompiled(inequality.rhsCompiled, normalizedScope);
+
+	if (left === null || right === null) {
+		return false;
+	}
+
+	switch (inequality.operator) {
+		case '<':
+			return left < right;
+		case '<=':
+			return left <= right;
+		case '>':
+			return left > right;
+		case '>=':
+			return left >= right;
+	}
+}
+
+function parsePiecewise(raw: string): ParsedEquationResult {
+	const trimmed = raw.trim();
+
+	if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: 'Use {condition: expression, ...} for piecewise functions.',
+			kind: 'cartesian',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: trimmed,
+			freeVariables: []
+		};
+	}
+
+	const body = trimmed.slice(1, -1).trim();
+
+	if (!body.length) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: 'Add at least one condition: expression pair.',
+			kind: 'cartesian',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: '{}',
+			freeVariables: []
+		};
+	}
+
+	const entries = splitTopLevel(body, ',');
+	const branches: PiecewiseBranch[] = [];
+	const freeVariables = new Set<string>();
+	const normalizedPairs: string[] = [];
+
+	for (const entry of entries) {
+		const pair = splitTopLevelOnce(entry, ':');
+
+		if (!pair) {
+			return {
+				node: null,
+				compiledExpression: null,
+				error: 'Each piecewise branch must use condition: expression syntax.',
+				kind: 'cartesian',
+				isParametric: false,
+				inequality: null,
+				parametric: null,
+				normalized: trimmed,
+				freeVariables: []
+			};
+		}
+
+		const [rawCondition, rawExpression] = pair;
+		const clauses = splitPiecewiseConditions(rawCondition);
+		const parsedClauses: PiecewiseConditionClause[] = [];
+
+		for (const clause of clauses) {
+			const parsedCondition = parseInequality(clause);
+
+			if (!parsedCondition.inequality || parsedCondition.error) {
+				return {
+					node: null,
+					compiledExpression: null,
+					error: parsedCondition.error ?? 'Invalid piecewise condition.',
+					kind: 'cartesian',
+					isParametric: false,
+					inequality: null,
+					parametric: null,
+					normalized: trimmed,
+					freeVariables: []
+				};
+			}
+
+			parsedClauses.push({
+				inequality: parsedCondition.inequality,
+				normalized: parsedCondition.normalized
+			});
+
+			for (const variable of parsedCondition.freeVariables) {
+				freeVariables.add(variable);
+			}
+		}
+
+		const expressionRaw = normalizeImplicitMultiplication(stripPrefix(rawExpression, 'cartesian'));
+		const invalid = validateIdentifiers(tokenize(expressionRaw));
+
+		if (invalid) {
+			return {
+				node: null,
+				compiledExpression: null,
+				error: `Unknown symbol "${invalid}".`,
+				kind: 'cartesian',
+				isParametric: false,
+				inequality: null,
+				parametric: null,
+				normalized: trimmed,
+				freeVariables: []
+			};
+		}
+
+		const expression = parseNode(expressionRaw);
+
+		if (!expression.node || expression.error) {
+			return {
+				node: null,
+				compiledExpression: null,
+				error: expression.error ?? 'Invalid piecewise branch expression.',
+				kind: 'cartesian',
+				isParametric: false,
+				inequality: null,
+				parametric: null,
+				normalized: trimmed,
+				freeVariables: []
+			};
+		}
+
+		for (const variable of extractFreeVariables(expressionRaw, expression.node)) {
+			freeVariables.add(variable);
+		}
+
+		branches.push({
+			conditions: parsedClauses,
+			conditionSource: parsedClauses.map((clause) => clause.normalized).join(' and '),
+			expressionNode: expression.node,
+			expressionCompiled: compileNativeExpression(expressionRaw),
+			expressionRaw
+		});
+		normalizedPairs.push(
+			`${parsedClauses.map((clause) => clause.normalized).join(' and ')}:${expressionRaw}`
+		);
+	}
+
+	const compiledExpression: EvalFunction = {
+		evaluate(scope) {
+			for (const branch of branches) {
+				if (branch.conditions.every((clause) => matchesInequality(clause.inequality, scope))) {
+					const normalizedScope =
+						scope instanceof Map ? Object.fromEntries(scope.entries()) : { ...scope };
+					return safeEvaluateCompiled(branch.expressionCompiled, normalizedScope) ?? Number.NaN;
+				}
+			}
+
+			return Number.NaN;
+		}
+	};
+
+	return {
+		node: null,
+		compiledExpression,
+		error: null,
+		kind: 'cartesian',
+		isParametric: false,
+		inequality: null,
+		parametric: null,
+		normalized: `{${normalizedPairs.join(',')}}`,
+		freeVariables: [...freeVariables].sort()
+	};
+}
+
 function parseImplicit(raw: string): ParsedEquationResult {
 	const trimmed = raw.trim();
 	const match = trimmed.match(/^(.*)=(.*)$/);
@@ -854,6 +1276,124 @@ function parseImplicit(raw: string): ParsedEquationResult {
 	};
 }
 
+function parseSlopeField(raw: string): ParsedEquationResult {
+	const normalized = normalizeImplicitMultiplication(stripPrefix(raw, 'slopefield'));
+	const invalid = validateIdentifiers(tokenize(normalized));
+
+	if (invalid) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: `Unknown symbol "${invalid}".`,
+			kind: 'slopefield',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized,
+			freeVariables: []
+		};
+	}
+
+	const parsed = parseNode(normalized);
+	const freeVariables = extractFreeVariables(normalized, parsed.node);
+
+	return {
+		node: parsed.node,
+		compiledExpression: parsed.node ? compileNativeExpression(normalized) : null,
+		error: parsed.error,
+		kind: 'slopefield',
+		isParametric: false,
+		inequality: null,
+		parametric: null,
+		normalized,
+		freeVariables: [...new Set([...freeVariables, 'x', 'y'])].sort()
+	};
+}
+
+function parseVectorField(raw: string): ParsedEquationResult {
+	const trimmed = raw.trim();
+	const match =
+		trimmed.match(/x\s*\(\s*t\s*\)\s*=\s*([^;\n]+)\s*[;,\n]\s*y\s*\(\s*t\s*\)\s*=\s*(.+)$/i) ??
+		trimmed.match(/y\s*\(\s*t\s*\)\s*=\s*([^;\n]+)\s*[;,\n]\s*x\s*\(\s*t\s*\)\s*=\s*(.+)$/i);
+	const parts = match ? [match[1]!, match[2]!] : splitTopLevel(trimmed, ';');
+
+	if (parts.length !== 2) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: 'Use P(x,y); Q(x,y) for vector fields.',
+			kind: 'vectorfield',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: trimmed,
+			freeVariables: []
+		};
+	}
+
+	const xRaw = normalizeImplicitMultiplication(parts[0]!);
+	const yRaw = normalizeImplicitMultiplication(parts[1]!);
+	const invalid = validateIdentifiers([...tokenize(xRaw), ...tokenize(yRaw)]);
+
+	if (invalid) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: `Unknown symbol "${invalid}".`,
+			kind: 'vectorfield',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: `${xRaw};${yRaw}`,
+			freeVariables: []
+		};
+	}
+
+	const xParsed = parseNode(xRaw);
+	const yParsed = parseNode(yRaw);
+
+	if (!xParsed.node || !yParsed.node) {
+		return {
+			node: null,
+			compiledExpression: null,
+			error: xParsed.error ?? yParsed.error,
+			kind: 'vectorfield',
+			isParametric: false,
+			inequality: null,
+			parametric: null,
+			normalized: `${xRaw};${yRaw}`,
+			freeVariables: []
+		};
+	}
+
+	return {
+		node: null,
+		compiledExpression: null,
+		error: null,
+		kind: 'vectorfield',
+		isParametric: false,
+		inequality: null,
+		// Reuse the parametric pair container for vector-field P/Q component evaluators.
+		parametric: {
+			xNode: xParsed.node,
+			yNode: yParsed.node,
+			xCompiled: compileNativeExpression(xRaw),
+			yCompiled: compileNativeExpression(yRaw),
+			xRaw,
+			yRaw
+		},
+		normalized: `${xRaw};${yRaw}`,
+		freeVariables: [
+			...new Set([
+				...extractFreeVariables(xRaw, xParsed.node),
+				...extractFreeVariables(yRaw, yParsed.node),
+				'x',
+				'y'
+			])
+		].sort()
+	};
+}
+
 export function parseEquation(raw: string, kind: EquationKind = 'cartesian'): ParsedEquationResult {
 	const trimmed = raw.trim();
 
@@ -887,6 +1427,18 @@ export function parseEquation(raw: string, kind: EquationKind = 'cartesian'): Pa
 
 	if (kind === 'parametric') {
 		return parseParametric(trimmed);
+	}
+
+	if (kind === 'slopefield') {
+		return parseSlopeField(trimmed);
+	}
+
+	if (kind === 'vectorfield') {
+		return parseVectorField(trimmed);
+	}
+
+	if (kind === 'cartesian' && trimmed.startsWith('{')) {
+		return parsePiecewise(trimmed);
 	}
 
 	if (kind === 'inequality' || /<=|>=|<|>/.test(trimmed)) {
@@ -1125,7 +1677,12 @@ export function sampleEquation(
 		);
 	}
 
-	if (input.kind === 'inequality' || input.kind === 'implicit') {
+	if (
+		input.kind === 'inequality' ||
+		input.kind === 'implicit' ||
+		input.kind === 'slopefield' ||
+		input.kind === 'vectorfield'
+	) {
 		return [];
 	}
 

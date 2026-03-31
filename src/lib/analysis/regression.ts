@@ -305,6 +305,7 @@ function matrixVectorMultiplyTranspose(jacobian: number[][], residuals: number[]
 
 const SAFE_REGRESSION_PARAM = /^[a-wyz]$/;
 const BLOCKED_PARAM_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_NONLINEAR_ITERATIONS = 60;
 
 function createSafeScope(params: Record<string, number>, x: number): Record<string, number> {
 	const scope = Object.create(null) as Record<string, number>;
@@ -331,7 +332,7 @@ function fitNonlinearLeastSquares(
 	initialValues: Record<string, number>,
 	evaluate: (params: Record<string, number>, x: number) => number | null
 ): { params: Record<string, number>; predicted: number[] } {
-	let params = { ...initialValues };
+	let params = Object.assign(Object.create(null), initialValues) as Record<string, number>;
 	let lambda = 0.01;
 	let lastError = Number.POSITIVE_INFINITY;
 
@@ -354,7 +355,7 @@ function fitNonlinearLeastSquares(
 		return { value, predicted };
 	};
 
-	for (let iteration = 0; iteration < 120; iteration += 1) {
+	for (let iteration = 0; iteration < MAX_NONLINEAR_ITERATIONS; iteration += 1) {
 		const base = rss(params);
 
 		if (!Number.isFinite(base.value)) {
@@ -369,8 +370,18 @@ function fitNonlinearLeastSquares(
 
 			for (const name of names) {
 				const step = Math.max(1e-6, Math.abs(params[name] ?? 0) * 1e-4);
-				const forward = { ...params, [name]: (params[name] ?? 0) + step };
-				const backward = { ...params, [name]: (params[name] ?? 0) - step };
+				const forward = Object.create(null) as Record<string, number>;
+				const backward = Object.create(null) as Record<string, number>;
+
+				for (let index = 0; index < names.length; index += 1) {
+					const paramName = names[index]!;
+					const value = params[paramName] ?? 0;
+					forward[paramName] = value;
+					backward[paramName] = value;
+				}
+
+				forward[name] = (forward[name] ?? 0) + step;
+				backward[name] = (backward[name] ?? 0) - step;
 				const y1 = evaluate(forward, dataset.x[row]!);
 				const y0 = evaluate(backward, dataset.x[row]!);
 				grads.push(
@@ -391,10 +402,11 @@ function fitNonlinearLeastSquares(
 
 		const jtR = matrixVectorMultiplyTranspose(jacobian, residuals);
 		const delta = gaussianSolve(jtJ, jtR);
-		const next = { ...params };
+		const next = Object.create(null) as Record<string, number>;
 
 		for (let index = 0; index < names.length; index += 1) {
-			next[names[index]!] = (next[names[index]!] ?? 0) + (delta[index] ?? 0);
+			const name = names[index]!;
+			next[name] = (params[name] ?? 0) + (delta[index] ?? 0);
 		}
 
 		const trial = rss(next);
@@ -403,7 +415,11 @@ function fitNonlinearLeastSquares(
 			params = next;
 			lambda *= 0.55;
 
-			if (Math.abs(lastError - trial.value) < 1e-9 || Math.hypot(...delta) < 1e-7) {
+			if (
+				Math.abs(lastError - trial.value) < 1e-9 ||
+				Math.hypot(...delta) < 1e-9 ||
+				trial.value < 1e-12
+			) {
 				return { params, predicted: trial.predicted };
 			}
 

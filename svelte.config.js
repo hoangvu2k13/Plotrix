@@ -1,5 +1,7 @@
 import adapter from '@sveltejs/adapter-static';
 
+const isDev = process.env.NODE_ENV !== 'production';
+
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
 	compilerOptions: {
@@ -20,7 +22,7 @@ const config = {
 				'base-uri': ['self'],
 				'object-src': ['none'],
 				'form-action': ['self', 'https://accounts.google.com'],
-				'script-src': ['self'],
+				'script-src': ['self', 'https://apis.google.com'],
 				'style-src': ['self', 'unsafe-inline'],
 				'font-src': ['self', 'data:'],
 				'img-src': [
@@ -37,7 +39,8 @@ const config = {
 					'https://securetoken.googleapis.com',
 					'https://identitytoolkit.googleapis.com',
 					'https://firestore.googleapis.com',
-					'https://firebaseinstallations.googleapis.com'
+					'https://firebaseinstallations.googleapis.com',
+					...(isDev ? ['ws:', 'wss:'] : [])
 				],
 				'frame-src': [
 					'self',

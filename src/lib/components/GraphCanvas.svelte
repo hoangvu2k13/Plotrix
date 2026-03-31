@@ -17,7 +17,19 @@
 	import type { UiState } from '$stores/ui.svelte';
 	import { copyText } from '$utils/download';
 	import { formatCoordinate } from '$utils/format';
-	let { graph, ui } = $props<{ graph: GraphState; ui: UiState }>();
+	let {
+		graph,
+		ui,
+		showControls = true,
+		showRangeInputs = true,
+		interactive = true
+	} = $props<{
+		graph: GraphState;
+		ui: UiState;
+		showControls?: boolean;
+		showRangeInputs?: boolean;
+		interactive?: boolean;
+	}>();
 
 	let host: HTMLDivElement | null = null;
 	let canvas: HTMLCanvasElement | null = null;
@@ -37,6 +49,9 @@
 		yMin: '',
 		yMax: ''
 	});
+	const viewSignature = $derived(
+		`${graph.view.originX},${graph.view.originY},${graph.view.scaleX},${graph.view.scaleY},${graph.viewport.width},${graph.viewport.height}`
+	);
 
 	function visibleRange() {
 		return {
@@ -94,7 +109,7 @@
 		const width = typeof window === 'undefined' ? x : window.innerWidth;
 		const height = typeof window === 'undefined' ? y : window.innerHeight;
 		const menuWidth = 220;
-		const menuHeight = 156;
+		const menuHeight = marker.constrainedPointId ? 252 : marker.equationId ? 208 : 156;
 
 		markerMenu = {
 			x: Math.max(12, Math.min(x, width - menuWidth)),
@@ -169,7 +184,40 @@
 		annotateMarker(markerMenu.marker);
 	}
 
+	function addTangentLineAtMarker(): void {
+		if (!markerMenu?.marker.equationId) {
+			return;
+		}
+
+		const tangent = graph.addTangentLine(markerMenu.marker.equationId, markerMenu.marker.x);
+
+		if (!tangent) {
+			return;
+		}
+
+		ui.pushToast({
+			title: 'Tangent line added',
+			description: 'A tangent line was added at the selected point.',
+			tone: 'success'
+		});
+		markerMenu = null;
+	}
+
+	function editConstrainedPoint(): void {
+		if (!markerMenu?.marker.equationId || !markerMenu.marker.constrainedPointId) {
+			return;
+		}
+
+		ui.setActiveAnalysisEquationId(markerMenu.marker.equationId);
+		ui.setActiveConstrainedPointId(markerMenu.marker.constrainedPointId);
+		markerMenu = null;
+	}
+
 	function handleCanvasPointerDown(event: PointerEvent): void {
+		if (!interactive) {
+			return;
+		}
+
 		if (event.pointerType !== 'touch') {
 			return;
 		}
@@ -211,7 +259,7 @@
 			ready = true;
 		});
 
-		const interactions = new InteractionManager(canvas, graph, ui, renderer);
+		const interactions = interactive ? new InteractionManager(canvas, graph, ui, renderer) : null;
 		let resizeFrame = 0;
 		const observer = new ResizeObserver((entries) => {
 			const entry = entries[0];
@@ -227,7 +275,7 @@
 		return () => {
 			if (resizeFrame) cancelAnimationFrame(resizeFrame);
 			observer.disconnect();
-			interactions.destroy();
+			interactions?.destroy();
 			renderer?.destroy();
 			clearLongPress();
 			graph.attachExporter(null);
@@ -242,14 +290,9 @@
 	});
 
 	$effect(() => {
-		void graph.view.originX;
-		void graph.view.originY;
-		void graph.view.scaleX;
-		void graph.view.scaleY;
-		void graph.viewport.width;
-		void graph.viewport.height;
+		void viewSignature;
 
-		if (editingBounds) {
+		if (editingBounds || graph.view.isPanning || graph.view.isAnimating) {
 			return;
 		}
 
@@ -269,12 +312,22 @@
 		class="canvas"
 		tabindex="0"
 		aria-label="Interactive Plotrix graph canvas"
-		oncontextmenu={handleCanvasContextMenu}
-		onpointerdown={handleCanvasPointerDown}
-		onpointermove={handleCanvasPointerMove}
-		onpointerup={clearLongPress}
-		onpointercancel={clearLongPress}
+		oncontextmenu={interactive ? handleCanvasContextMenu : undefined}
+		onpointerdown={interactive ? handleCanvasPointerDown : undefined}
+		onpointermove={interactive ? handleCanvasPointerMove : undefined}
+		onpointerup={interactive ? clearLongPress : undefined}
+		onpointercancel={interactive ? clearLongPress : undefined}
 	></canvas>
+
+	{#if ui.calibrationMode}
+		<div
+			style="position:absolute;left:50%;top:18px;transform:translateX(-50%);padding:10px 14px;border-radius:999px;border:1px solid var(--color-border);background:color-mix(in oklch, var(--color-bg-surface) 92%, transparent);backdrop-filter:blur(14px);color:var(--color-text-primary);font-size:0.9rem;font-weight:600;pointer-events:none;z-index:7;"
+		>
+			{ui.calibrationMode.step === 1
+				? 'Calibration: click the first known point on the image'
+				: 'Calibration: click the second known point on the image'}
+		</div>
+	{/if}
 
 	{#if !ready}
 		<div class="canvas-skeleton" aria-hidden="true">
@@ -289,70 +342,74 @@
 		</div>
 	{/if}
 
-	<div class="zoom-pod" aria-label="Viewport controls">
-		<button type="button" class="zoom-icon" aria-label="Zoom in" onclick={zoomIn}>
-			<Icon icon={Plus} size="var(--icon-lg)" class="zoom-glyph" />
-		</button>
-		<button type="button" class="zoom-icon" aria-label="Zoom out" onclick={zoomOut}>
-			<Icon icon={Minus} size="var(--icon-lg)" class="zoom-glyph" />
-		</button>
-		<button type="button" class="zoom-label" onclick={fitAll}>
-			<Icon icon={Maximize2} size="var(--icon-md)" class="zoom-glyph" />
-			<span>Fit all</span>
-		</button>
-		<button type="button" class="zoom-label" onclick={resetView}>
-			<Icon icon={RotateCcw} size="var(--icon-md)" class="zoom-glyph" />
-			<span>Reset</span>
-		</button>
-	</div>
-
-	<div class="range-pods" aria-label="Viewport range inputs">
-		<div class="range-pair">
-			<label>
-				<span>x min</span>
-				<input
-					type="number"
-					bind:value={rangeInputs.xMin}
-					onfocus={() => (editingBounds = true)}
-					onblur={commitBounds}
-					onkeydown={(event) => event.key === 'Enter' && commitBounds()}
-				/>
-			</label>
-			<label>
-				<span>x max</span>
-				<input
-					type="number"
-					bind:value={rangeInputs.xMax}
-					onfocus={() => (editingBounds = true)}
-					onblur={commitBounds}
-					onkeydown={(event) => event.key === 'Enter' && commitBounds()}
-				/>
-			</label>
+	{#if showControls}
+		<div class="zoom-pod" aria-label="Viewport controls">
+			<button type="button" class="zoom-icon" aria-label="Zoom in" onclick={zoomIn}>
+				<Icon icon={Plus} size="var(--icon-lg)" class="zoom-glyph" />
+			</button>
+			<button type="button" class="zoom-icon" aria-label="Zoom out" onclick={zoomOut}>
+				<Icon icon={Minus} size="var(--icon-lg)" class="zoom-glyph" />
+			</button>
+			<button type="button" class="zoom-label" onclick={fitAll}>
+				<Icon icon={Maximize2} size="var(--icon-md)" class="zoom-glyph" />
+				<span>Fit all</span>
+			</button>
+			<button type="button" class="zoom-label" onclick={resetView}>
+				<Icon icon={RotateCcw} size="var(--icon-md)" class="zoom-glyph" />
+				<span>Reset</span>
+			</button>
 		</div>
+	{/if}
 
-		<div class="range-pair">
-			<label>
-				<span>y min</span>
-				<input
-					type="number"
-					bind:value={rangeInputs.yMin}
-					onfocus={() => (editingBounds = true)}
-					onblur={commitBounds}
-					onkeydown={(event) => event.key === 'Enter' && commitBounds()}
-				/>
-			</label>
-			<label>
-				<span>y max</span>
-				<input
-					type="number"
-					bind:value={rangeInputs.yMax}
-					onfocus={() => (editingBounds = true)}
-					onblur={commitBounds}
-					onkeydown={(event) => event.key === 'Enter' && commitBounds()}
-				/>
-			</label>
+	{#if showRangeInputs}
+		<div class="range-pods" aria-label="Viewport range inputs">
+			<div class="range-pair">
+				<label>
+					<span>x min</span>
+					<input
+						type="number"
+						bind:value={rangeInputs.xMin}
+						onfocus={() => (editingBounds = true)}
+						onblur={commitBounds}
+						onkeydown={(event) => event.key === 'Enter' && commitBounds()}
+					/>
+				</label>
+				<label>
+					<span>x max</span>
+					<input
+						type="number"
+						bind:value={rangeInputs.xMax}
+						onfocus={() => (editingBounds = true)}
+						onblur={commitBounds}
+						onkeydown={(event) => event.key === 'Enter' && commitBounds()}
+					/>
+				</label>
+			</div>
+
+			<div class="range-pair">
+				<label>
+					<span>y min</span>
+					<input
+						type="number"
+						bind:value={rangeInputs.yMin}
+						onfocus={() => (editingBounds = true)}
+						onblur={commitBounds}
+						onkeydown={(event) => event.key === 'Enter' && commitBounds()}
+					/>
+				</label>
+				<label>
+					<span>y max</span>
+					<input
+						type="number"
+						bind:value={rangeInputs.yMax}
+						onfocus={() => (editingBounds = true)}
+						onblur={commitBounds}
+						onkeydown={(event) => event.key === 'Enter' && commitBounds()}
+					/>
+				</label>
+			</div>
 		</div>
-	</div>
+	{/if}
 
 	{#if markerMenu}
 		<button
@@ -379,6 +436,18 @@
 				<Icon icon={MessageSquarePlus} size="var(--icon-md)" class="menu-icon" />
 				<span>Add annotation</span>
 			</button>
+			{#if markerMenu.marker.equationId}
+				<button type="button" role="menuitem" onclick={addTangentLineAtMarker}>
+					<Icon icon={LocateFixed} size="var(--icon-md)" class="menu-icon" />
+					<span>Add tangent line here</span>
+				</button>
+			{/if}
+			{#if markerMenu.marker.constrainedPointId}
+				<button type="button" role="menuitem" onclick={editConstrainedPoint}>
+					<Icon icon={MessageSquarePlus} size="var(--icon-md)" class="menu-icon" />
+					<span>Edit point</span>
+				</button>
+			{/if}
 		</div>
 	{/if}
 </div>

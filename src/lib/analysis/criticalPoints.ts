@@ -22,6 +22,11 @@ export interface AnalysisViewport {
 const ROOT_TOLERANCE = 1e-6;
 const ROOT_MERGE_TOLERANCE = 1e-4;
 const MAX_MARKERS = 50;
+const MAX_CRITICAL_SAMPLES = 3000;
+const CRITICAL_XS = new Float64Array(MAX_CRITICAL_SAMPLES);
+const CRITICAL_YS = new Float64Array(MAX_CRITICAL_SAMPLES);
+const CRITICAL_D1 = new Float64Array(MAX_CRITICAL_SAMPLES);
+const CRITICAL_D2 = new Float64Array(MAX_CRITICAL_SAMPLES);
 
 function visibleRange(viewport: AnalysisViewport, canvasWidth: number) {
 	const width = viewport.width ?? canvasWidth;
@@ -75,12 +80,12 @@ export function analyzeCriticalPoints(
 ): CriticalPoint[] {
 	const range = visibleRange(viewport, canvasWidth);
 	const yRange = Math.max(1e-6, range.yMax - range.yMin);
-	const sampleCount = Math.max(800, Math.round(canvasWidth * 2));
+	const sampleCount = Math.min(MAX_CRITICAL_SAMPLES, Math.max(800, Math.round(canvasWidth * 2)));
 	const step = sampleCount > 1 ? (range.xMax - range.xMin) / (sampleCount - 1) : 0;
-	const xs = new Float64Array(sampleCount);
-	const ys = new Float64Array(sampleCount);
-	const d1 = new Float64Array(sampleCount);
-	const d2 = new Float64Array(sampleCount);
+	const xs = CRITICAL_XS.subarray(0, sampleCount);
+	const ys = CRITICAL_YS.subarray(0, sampleCount);
+	const d1 = CRITICAL_D1.subarray(0, sampleCount);
+	const d2 = CRITICAL_D2.subarray(0, sampleCount);
 	const points: CriticalPoint[] = [];
 
 	for (let index = 0; index < sampleCount; index += 1) {
